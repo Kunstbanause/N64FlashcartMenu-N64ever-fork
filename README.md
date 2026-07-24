@@ -1,3 +1,8 @@
+# FORK
+Merges the large ROM fix from here: https://github.com/Kunstbanause/N64FlashcartMenu---EDx7-fix into the gallery mod N64ever.
+
+<img src="screenshots/1.png" alt="Gallery" width="320"> <img src="screenshots/2.png" alt="Gallery" width="320"> <img src="screenshots/3.png" alt="Gallery" width="320">
+___
 # N64ever — Documentation
 
 A personal fork of **N64FlashcartMenu** (by NetworkFusion & Polprzewodnikowy) focused on a
