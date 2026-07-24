@@ -1,0 +1,60 @@
+#include "views.h"
+#include "../sound.h"
+
+
+static void process (menu_t *menu) {
+    if (menu->actions.back) {
+        sound_play_effect(SFX_EXIT);
+        /* Return to wherever the error was raised from (grid/history), defaulting
+           to the file browser when the caller didn't specify. */
+        menu->next_mode = (menu->error_return_mode != MENU_MODE_NONE)
+                        ? menu->error_return_mode : MENU_MODE_BROWSER;
+    }
+}
+
+static void draw (menu_t *menu, surface_t *d) {
+    rdpq_attach(d, NULL);
+
+    ui_components_background_draw();
+
+    if (menu->error_message) {
+        ui_components_messagebox_draw(menu->error_message);
+    } else {
+        ui_components_messagebox_draw("Unspecified error");
+    }
+
+    rdpq_detach_show();
+}
+
+static void deinit (menu_t *menu) {
+    menu->error_message = NULL;
+    menu->error_return_mode = MENU_MODE_NONE;
+    menu->flashcart_err = FLASHCART_OK;
+}
+
+
+void view_error_init (menu_t *menu) {
+    if (menu->flashcart_err != FLASHCART_OK) {
+        debugf(
+            "Flashcart error [%d]: %s\n",
+            menu->flashcart_err,
+            flashcart_convert_error_message(menu->flashcart_err)
+        );
+    }
+}
+
+void view_error_display (menu_t *menu, surface_t *display) {
+    process(menu);
+
+    draw(menu, display);
+
+    if (menu->next_mode != MENU_MODE_ERROR) {
+        deinit(menu);
+    }
+}
+
+void menu_show_error (menu_t *menu, char *error_message) {
+    sound_play_effect(SFX_ERROR);
+    menu->next_mode = MENU_MODE_ERROR;
+    menu->error_message = error_message;
+}

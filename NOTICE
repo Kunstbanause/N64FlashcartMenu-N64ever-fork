@@ -1,0 +1,38 @@
+N64ever
+=======
+
+N64ever is a MODIFIED FORK of N64FlashcartMenu.
+
+Original work
+-------------
+  N64FlashcartMenu
+  Copyright (C) Robin Jones (NetworkFusion), Mateusz Faderewski (Polprzewodnikowy),
+  and the N64FlashcartMenu contributors.
+  https://github.com/Polprzewodnikowy/N64FlashcartMenu
+  This fork is based on N64FlashcartMenu V0.3.2.
+
+Modifications
+-------------
+  Modified in 2026 by Bjerreman and contributors.
+  (No separate copyright is claimed over these modifications.)
+
+  This is a modified version of N64FlashcartMenu. It adds, among other changes:
+  a cover-art Favorites Grid front-end, a unified popup-based UI, a baked-in
+  box-art and text-metadata library, a 64DD disc-linking workflow, an idle
+  screensaver, and file-management tools. See README.md (its changelog
+  section) and CHANGELOG.md for the full list of changes.
+
+  First public pre-release: 2026.
+
+License
+-------
+  This program is free software: you can redistribute it and/or modify it under
+  the terms of the GNU Affero General Public License v3.0 as published by the
+  Free Software Foundation. See LICENSE.md for the full text.
+
+  This program is distributed WITHOUT ANY WARRANTY; without even the implied
+  warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+  The complete corresponding source code is provided with this distribution.
+  Bundled third-party components retain their own licenses; see README.md and
+  LICENSE-COMPLIANCE.md.
