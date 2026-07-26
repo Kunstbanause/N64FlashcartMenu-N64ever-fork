@@ -589,7 +589,8 @@ static void actions_bar_slot_draw (const char *txt, int x, int width, rdpq_align
  * @param b Label for the B slot.
  * @param s Label for the S (Start) slot.
  * @param c Label for the C slot.
- * @param r Label for the R slot (right-anchored), e.g. "R: Menu".
+ * @param r Label for the right-anchored slot, e.g. "Z: Menu" (the physical button behind
+ *          this slot is view-dependent; Z=options is the convention almost everywhere).
  */
 void ui_components_actions_bar_buttons_draw (const char *a, const char *b, const char *s, const char *c, const char *r) {
     int x0 = VISIBLE_AREA_X0 + TEXT_MARGIN_HORIZONTAL;

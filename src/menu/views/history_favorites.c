@@ -315,7 +315,7 @@ static void draw(menu_t *menu, surface_t *display) {
     ui_components_actions_bar_text_draw(
         STL_DEFAULT, ALIGN_CENTER, VALIGN_TOP,
         "C▲▼: Scroll\n"
-        "Tabs: ◀ L/Z   R ▶"
+        "Tabs: ◀ L   Z ▶"
     );
 
     if (menu->current_time >= 0) {

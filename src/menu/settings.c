@@ -37,6 +37,7 @@ static settings_t init = {
     .rumble_enabled = false,
     .grid_square_tiles = false,
     .grid_large_tiles = false,
+    .grid_show_captions_favorites = false,
     .splash_enabled = false,
     .background_image_enabled = false,
     .custom_splash_enabled = false,
@@ -105,6 +106,7 @@ void settings_load (settings_t *settings) {
     settings->rumble_enabled = ini_get_bool(ini, "menu_beta_flag", "rumble_enabled", init.rumble_enabled);
     settings->grid_square_tiles = ini_get_bool(ini, "menu", "grid_square_tiles", init.grid_square_tiles);
     settings->grid_large_tiles  = ini_get_bool(ini, "menu", "grid_large_tiles", init.grid_large_tiles);
+    settings->grid_show_captions_favorites = ini_get_bool(ini, "menu", "grid_show_captions_favorites", init.grid_show_captions_favorites);
     settings->splash_enabled    = ini_get_bool(ini, "menu", "splash_enabled", init.splash_enabled);
     settings->background_image_enabled = ini_get_bool(ini, "menu", "background_image_enabled", init.background_image_enabled);
     settings->custom_splash_enabled = ini_get_bool(ini, "menu", "custom_splash_enabled", init.custom_splash_enabled);
@@ -157,6 +159,7 @@ void settings_save (settings_t *settings) {
 
     ini_set_bool(ini, "menu", "grid_square_tiles",   settings->grid_square_tiles);
     ini_set_bool(ini, "menu", "grid_large_tiles",    settings->grid_large_tiles);
+    ini_set_bool(ini, "menu", "grid_show_captions_favorites", settings->grid_show_captions_favorites);
     ini_set_bool(ini, "menu", "splash_enabled",      settings->splash_enabled);
     ini_set_bool(ini, "menu", "background_image_enabled", settings->background_image_enabled);
     ini_set_bool(ini, "menu", "custom_splash_enabled", settings->custom_splash_enabled);

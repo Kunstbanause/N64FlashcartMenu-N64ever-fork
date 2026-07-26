@@ -87,6 +87,11 @@ typedef struct {
     /** @brief Larger grid tiles (bigger covers, ~one less row). Off = Small (default). */
     bool grid_large_tiles;
 
+    /** @brief Also show the ROM filename as a caption under each tile's art on the Favorites
+     *  tab (library tabs always show it, to tell apart ROM hacks that share their base game's
+     *  box art). Off (default) keeps Favorites art-only. */
+    bool grid_show_captions_favorites;
+
     /** @brief Show background image as a splash screen on boot until grid boxart loads */
     bool splash_enabled;
 

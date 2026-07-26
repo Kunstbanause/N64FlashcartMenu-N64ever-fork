@@ -24,8 +24,8 @@ The File Browser allows you to navigate and manage files on your N64 flashcart. 
 
 2. **Performing File Operations**:
    - Highlight the file or directory you want to operate on.
-   - Press the `R` Button to open the operations menu.
-   - Select the desired operation (delete, show properties, set as default, extract) and follow the on-screen prompts.
+   - Press the `Z` Button to open the operations menu.
+   - Select the desired operation (delete, show properties, set as default, extract, pin as library — see [Pinned Libraries](./23_pinned_libraries.md)) and follow the on-screen prompts.
 
 3. **Viewing Settings menu**:
    - Press the `Z` Button to display the menu.

@@ -109,7 +109,7 @@ void rtc_ui_component_editdatetime_draw ( struct tm t, rtc_field_t selected_fiel
     int hint_y = vy + line_h + gap;
     rdpq_textparms_t hp = { .width = box_w - pad * 2, .align = ALIGN_CENTER, .wrap = WRAP_NONE };
     rdpq_text_print(&hp, FNT_DEFAULT, fx0, hint_y,          "Up/Down: Adjust   Left/Right: Field");
-    rdpq_text_print(&hp, FNT_DEFAULT, fx0, hint_y + line_h, "R: Save   B: Back");
+    rdpq_text_print(&hp, FNT_DEFAULT, fx0, hint_y + line_h, "Z: Save   B: Back");
 }
 
 static void process (menu_t *menu) {
@@ -138,7 +138,7 @@ static void process (menu_t *menu) {
         else if (menu->actions.go_down) {
             adjust_rtc_time( &rtc_tm, -1 );
         }
-        else if (menu->actions.options) { // R button = save
+        else if (menu->actions.options) { // Z button = save
             if( rtc_get_source() == RTC_SOURCE_JOYBUS && rtc_is_source_available( RTC_SOURCE_JOYBUS ) ) {
                 struct timeval new_time = { .tv_sec = mktime(&rtc_tm) };
                 int res = settimeofday(&new_time, NULL);

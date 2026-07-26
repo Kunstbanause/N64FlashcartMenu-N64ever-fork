@@ -249,13 +249,18 @@ static bool try_dfs_sprite(component_boxart_t *b, const char *game_code, file_im
     return false;
 }
 
-/* Attempt to load an SD-card metadata-folder PNG for the given code+type. */
+/* Attempt to load an SD-card metadata-folder PNG for the given code+type. `stem` (the ROM's own
+   filename, no extension/path) is the fallback identity for ROMs with no matching code-keyed art
+   directory -- homebrew and ROM hacks routinely share a generic/duplicated header code, so a
+   per-code folder either collides or never matches; keying by the ROM's own filename instead
+   gives every such ROM a stable, distinct art slot under the same homebrew/ directory. */
 static bool try_metadata_png(component_boxart_t *b, const char *storage_prefix,
-                             const char *game_code, const char *rom_title, file_image_type_t t) {
+                             const char *game_code, const char *rom_title, const char *stem,
+                             file_image_type_t t) {
     const char *filename = metadata_type_filename(t);
     if (!filename) return false;
 
-    char boxart_path[32];
+    char boxart_path[300];
     path_t *path = path_init(storage_prefix, METADATA_BASE_DIRECTORY);
 
     if (game_code[1] == 'E' && game_code[2] == 'D' && rom_title) {
@@ -273,6 +278,13 @@ static bool try_metadata_png(component_boxart_t *b, const char *storage_prefix,
             path = path_init(storage_prefix, OLD_BOXART_DIRECTORY);
             path_push(path, boxart_path);
             if (!directory_exists(path_get(path))) path_pop(path);
+        }
+        /* No code-keyed directory anywhere -- fall back to a filename-keyed homebrew slot. */
+        if (!directory_exists(path_get(path)) && stem && stem[0]) {
+            path_free(path);
+            path = path_init(storage_prefix, METADATA_BASE_DIRECTORY);
+            snprintf(boxart_path, sizeof(boxart_path), HOMEBREW_ID_SUBDIRECTORY"/%s", stem);
+            path_push(path, boxart_path);
         }
     }
 
@@ -361,7 +373,7 @@ component_boxart_t *ui_components_boxart_init(const char *storage_prefix, const 
         if (try_dfs_sprite(b, dfs_code, t)) return b;
 
         /* 3. SD-card metadata-folder PNG. */
-        if (try_metadata_png(b, storage_prefix, game_code, rom_title, t)) return b;
+        if (try_metadata_png(b, storage_prefix, game_code, rom_title, stem, t)) return b;
     }
 
     free(b);

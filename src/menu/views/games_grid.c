@@ -8,6 +8,7 @@
 #include "../fonts.h"
 #include "../game_metadata.h"
 #include "../game_special.h"
+#include "../library.h"
 #include "../path.h"
 #include "../rom_custom.h"
 #include "../rom_info.h"
@@ -17,11 +18,25 @@
 #include "utils/fs.h"
 #include "views.h"
 
-/* ---------- Grid area (frameless, tab-less: fills the whole visible area) ---------- */
+/* ---------- Grid area ----------
+   The tab bar is always shown now: Favorites plus either the pinned libraries, or (when none
+   are pinned) a single placeholder tab explaining how to pin one. There are always >= 2 tabs,
+   so L/R always has somewhere real to go -- see grid_tab_count(). */
 #define GRID_X0             (VISIBLE_AREA_X0)
-#define GRID_Y0             (VISIBLE_AREA_Y0)
+#define GRID_Y0             (grid_y0())
 #define GRID_X1             (VISIBLE_AREA_X1)
 #define GRID_Y1             LAYOUT_ACTIONS_SEPARATOR_Y
+
+/* Tab set: 0 = Favorites, 1..library_count() = a pinned library. When library_count() == 0,
+   grid_tab == 1 is a placeholder (not a real gallery) rather than a stale index. The file
+   browser is reached via the grid's Z-menu ("File Browser" row), not a tab. */
+static int grid_tab_count(void) {
+    int n = library_count();
+    return n > 0 ? n + 1 : 2;   /* Favorites + libraries, or Favorites + placeholder */
+}
+static int grid_y0(void) {
+    return VISIBLE_AREA_Y0 + TAB_HEIGHT;
+}
 
 /* ---------- Flow (masonry) layout ----------
    Landscape covers are wide; Japanese covers are vertical, so a row of JP games
@@ -35,6 +50,9 @@
 #define LAND_H              74
 #define PORT_W              80      /* Japanese vertical cover cell (taller, narrower) */
 #define PORT_H              112
+/* Filename caption strip carved off the bottom of a tile's art when captions are on (library
+   tabs always; Favorites opt-in) -- disambiguates ROM hacks that share their base game's art. */
+#define TILE_CAPTION_H      14
 
 /* ---------- Inspect popup ---------- */
 /* 2+2 inspect layout: smaller frame; top band = art | description (with a
@@ -93,6 +111,23 @@ static grid_entry_t        fav_entry_cache[FAVORITES_COUNT];
 static component_boxart_t *boxart_cache[FAVORITES_COUNT];
 static bool                boxart_cache_attempted[FAVORITES_COUNT];
 
+/* The active tab's item array: menu->bookkeeping.favorite_items[] on the Favorites tab,
+   or a pinned library's item array on a library tab. Every "favorite index" (fav_i,
+   fav_indices[...], near_i, gi, fa/fb) below indexes INTO THIS, not necessarily into the
+   real favorites list -- see gm_target_fav_index() for the (separate) real-favorites search
+   used by the handful of call sites that must stay bound to favorites.ini regardless of tab. */
+static bookkeeping_item_t *grid_items     = NULL;
+static int                 grid_items_cap = 0;
+
+/* 0 = Favorites, 1..library_count() = a pinned library (see grid_tab_count() above). */
+static int  grid_tab = 0;
+
+/* "Working..." box shown for one frame before a first-visit library scan runs (the scan
+   itself is a fast in-memory directory walk -- no per-ROM header reads -- but staging it
+   behind a frame avoids an instant freeze on a folder with many entries). */
+static bool lib_scan_working = false;
+static int  lib_scan_tab     = -1;
+
 static int  fav_indices[FAVORITES_COUNT];
 static int  fav_count = 0;
 
@@ -112,7 +147,7 @@ static int  sel_fav    = 0;     /* selected favorite (index into fav order) */
 static int  prev_sel_fav = -1;  /* drives the selection-grow animation */
 
 static bool    show_inspect  = false;
-static bool    show_confirm_remove = false; /* R: remove-favorite confirmation popup */
+static bool    show_confirm_remove = false; /* Z: remove-favorite confirmation popup */
 static bool    show_confirm_sort   = false; /* Favorites submenu: confirm Sort A-Z */
 static bool    show_confirm_clear  = false; /* Favorites submenu: confirm Clear all */
 static bool    show_confirm_autosort = false; /* Favorites submenu: confirm enabling Always sort */
@@ -126,6 +161,7 @@ static uint8_t inspect_pulse = 0;    /* brightness breathing */
 
 static bool         grid_sq             = false;
 static bool         grid_large          = false;  /* Tile size: false=Small (default), true=Large */
+static bool         grid_caption_favs   = false;  /* Favorites-tab caption opt-in (library tabs always show it) */
 static int          inspect_fav_i_cached = -1;
 static rom_custom_t inspect_custom;
 static bool         inspect_has_custom  = false;
@@ -229,11 +265,18 @@ static char    gm_gs_insp_lbl[28]   = "Inspect: Front";
 static char    gm_gs_load_lbl[28]   = "Load: Front";
 static char    gm_gs_sq_lbl[28]     = "Tile: Square";
 static char    gm_gs_tile_lbl[28]   = "Tile size: Small";
+static char    gm_gs_caption_lbl[32] = "Favorites captions: Off";
 /* Per-game "Presents As" labels (override for THIS game) */
 static char    gm_pa_grid_lbl[28]   = "Grid: Default";
 static char    gm_pa_insp_lbl[28]   = "Inspect: Default";
 static char    gm_pa_load_lbl[28]   = "Load: Default";
 static char    gm_autosort_lbl[28]  = "Always sort A-Z: No";
+/* These three blank out (hidden -- see ui_components/context_menu.c's empty-text-is-a-
+   separator convention) on a library tab: sort/clear/always-sort only ever touch the
+   real favorites list, which a library tab isn't. */
+static char    gm_sort_lbl[24]      = "Run Once: Sort A-Z";
+static char    gm_clear_lbl[28]     = "Clear all favorites";
+static char    gm_rescan_lbl[24]    = "";   /* "Rescan library" -- shown only on a library tab */
 
 /* History popup — forward-declared; built by gm_rebuild_history() */
 #define GM_HIST_MAX 20
@@ -271,6 +314,7 @@ static void gm_gs_cycle_inspect(menu_t *menu, void *arg);
 static void gm_gs_cycle_load(menu_t *menu, void *arg);
 static void gm_gs_toggle_square(menu_t *menu, void *arg);
 static void gm_gs_toggle_tile(menu_t *menu, void *arg);
+static void gm_gs_toggle_caption(menu_t *menu, void *arg);
 static void gm_gs_set_region(menu_t *menu, void *arg);
 static void gm_hist_launch(menu_t *menu, void *arg);
 static void gm_open_history(menu_t *menu, void *arg);
@@ -284,6 +328,7 @@ static void gm_pa_reset(menu_t *menu, void *arg);
 static void gm_fav_sort(menu_t *menu, void *arg);
 static void gm_fav_clear(menu_t *menu, void *arg);
 static void gm_fav_toggle_autosort(menu_t *menu, void *arg);
+static void gm_rescan_library(menu_t *menu, void *arg);
 
 /* Hardware submenu */
 static component_context_menu_t gm_hw_cm = { .list = {
@@ -326,10 +371,12 @@ static component_context_menu_t gm_gs_cm = { .list = {
     { .text = gm_gs_sq_lbl,   .action = gm_gs_toggle_square, .arg = (void*)(intptr_t)6 },  /* row 6 */
     { .text = gm_gs_tile_lbl, .action = gm_gs_toggle_tile,   .arg = (void*)(intptr_t)7 },  /* row 7 (tile size) */
     { .text = "" },                                              /* row 8 */
-    { .text = "Run Once: Sort A-Z",  .action = gm_fav_sort },    /* row 9 */
+    { .text = gm_sort_lbl,           .action = gm_fav_sort },    /* row 9 */
     { .text = gm_autosort_lbl,       .action = gm_fav_toggle_autosort }, /* row 10 */
     { .text = "" },                                              /* row 11 */
-    { .text = "Clear all favorites", .action = gm_fav_clear },   /* row 12 */
+    { .text = gm_clear_lbl,          .action = gm_fav_clear },   /* row 12 */
+    { .text = "" },                                              /* row 13 */
+    { .text = gm_gs_caption_lbl,     .action = gm_gs_toggle_caption, .arg = (void*)(intptr_t)14 },  /* row 14 */
     COMPONENT_CONTEXT_MENU_LIST_END,
 }};
 
@@ -362,6 +409,7 @@ static component_context_menu_t gm_pa_cm = { .list = {
 static component_context_menu_t gm_more_cm = { .list = {
     { .text = "Launch",           .action = gm_launch },
     { .text = gm_fav_lbl,         .action = gm_fav_toggle },
+    { .text = gm_rescan_lbl,      .action = gm_rescan_library },   /* blank/hidden off a library tab */
     { .text = "" },
     { .text = "Game Look",        .submenu = &gm_pa_cm },
     { .text = "Grid settings",    .submenu = &gm_gs_cm },   /* + Sort / Clear / Always-sort */
@@ -562,12 +610,13 @@ static void ensure_visible(void) {
 
 /* ------------------------------------------------------------------ */
 static void rebuild_fav_list(menu_t *menu) {
+    (void)menu;
     fav_count = 0;
-    for (int i = 0; i < FAVORITES_COUNT; i++) {
+    for (int i = 0; i < grid_items_cap; i++) {
         /* Include ROM *and* DISK favorites (64DD .ndd standalone discs and Link-disc combined
            pairs are type DISK) -- only skip empty slots. The grid pipeline handles disks
            (load_rom_info_into DISK branch, JP orientation, launch routing). */
-        if (menu->bookkeeping.favorite_items[i].bookkeeping_type != BOOKKEEPING_TYPE_EMPTY) {
+        if (grid_items[i].bookkeeping_type != BOOKKEEPING_TYPE_EMPTY) {
             fav_indices[fav_count++] = i;
         }
     }
@@ -707,7 +756,7 @@ static void fav_name_from_filename(path_t *p, char *out, size_t outsz) {
 }
 
 static void load_rom_info_into(grid_entry_t *e, int fav_i, menu_t *menu) {
-    bookkeeping_item_t *bk = &menu->bookkeeping.favorite_items[fav_i];
+    bookkeeping_item_t *bk = &grid_items[fav_i];
     e->is_disk = (bk->bookkeeping_type == BOOKKEEPING_TYPE_DISK);
     e->special = -1;
     path_t *p = bk->primary_path;
@@ -813,7 +862,7 @@ static void load_rom_info_into(grid_entry_t *e, int fav_i, menu_t *menu) {
 static bool gm_load_boxart(menu_t *menu, int fav_i) {
     boxart_cache_attempted[fav_i] = true;
     /* Per-game override (gameconfigs .ini) takes precedence over the global. */
-    int gv_ovr = rom_config_get_image_view(menu->bookkeeping.favorite_items[fav_i].primary_path, 0);
+    int gv_ovr = rom_config_get_image_view(grid_items[fav_i].primary_path, 0);
     int gv = (gv_ovr >= 0 && gv_ovr < GRID_IMAGE_COUNT) ? gv_ovr : menu->settings.image_view_grid;
     file_image_type_t img_type = ui_components_boxart_view_to_type(gv);
     /* The presents_as region override only affects box front/back art; cart, 3D and
@@ -827,7 +876,7 @@ static bool gm_load_boxart(menu_t *menu, int fav_i) {
     component_boxart_t *b = ui_components_boxart_init(
         menu->storage_prefix, eff_gc,
         fav_entry_cache[fav_i].title,
-        path_get(menu->bookkeeping.favorite_items[fav_i].primary_path),
+        path_get(grid_items[fav_i].primary_path),
         img_type, menu->settings.use_custom_files);
     boxart_cache[fav_i] = b;
     return (b && b->loading);
@@ -998,13 +1047,13 @@ static void maybe_background_load(menu_t *menu) {
                             strncpy(ne->meta_name, m.title, sizeof(ne->meta_name) - 1);
                             ne->meta_name[sizeof(ne->meta_name) - 1] = '\0';
                         } else if (!ne->title[0] &&
-                                   menu->bookkeeping.favorite_items[near_i].bookkeeping_type
+                                   grid_items[near_i].bookkeeping_type
                                        != BOOKKEEPING_TYPE_DISK) {
                             /* ROMs only -- reading a .ndd disk through the cartridge header
                                path yields a garbage "title" (e.g. "(.480FL(4<"). Disks fall
                                straight through to the filename fallback below. */
                             rom_info_t hi;
-                            path_t *pp = menu->bookkeeping.favorite_items[near_i].primary_path;
+                            path_t *pp = grid_items[near_i].primary_path;
                             if (pp && path_has_value(pp) && rom_info_load_quick(pp, &hi) == ROM_OK) {
                                 char t[21]; memcpy(t, hi.title, 20); t[20] = '\0';
                                 for (int k = 19; k >= 0 && t[k] == ' '; k--) t[k] = '\0';
@@ -1020,7 +1069,7 @@ static void maybe_background_load(menu_t *menu) {
                            conversion): show the user's own filename rather than "Unknown". */
                         if (!ne->meta_name[0]) {
                             fav_name_from_filename(
-                                menu->bookkeeping.favorite_items[near_i].primary_path,
+                                grid_items[near_i].primary_path,
                                 ne->meta_name, sizeof(ne->meta_name));
                         }
                     }
@@ -1042,12 +1091,16 @@ static void maybe_background_load(menu_t *menu) {
 /* Swap two entries by their global index in fav_indices[].
    Updates bookkeeping + all caches so the order is always consistent. */
 static void swap_global_favs(menu_t *menu, int gi_a, int gi_b) {
+    /* Belt-and-braces: move mode is Favorites-only (hidden on a library tab -- see
+       process()'s move_mode gating), but never write through grid_items unless it's
+       really the real favorites array. */
+    if (grid_items != menu->bookkeeping.favorite_items) return;
     int fa = fav_indices[gi_a];
     int fb = fav_indices[gi_b];
 
-    bookkeeping_item_t tmp_bk = menu->bookkeeping.favorite_items[fa];
-    menu->bookkeeping.favorite_items[fa] = menu->bookkeeping.favorite_items[fb];
-    menu->bookkeeping.favorite_items[fb] = tmp_bk;
+    bookkeeping_item_t tmp_bk = grid_items[fa];
+    grid_items[fa] = grid_items[fb];
+    grid_items[fb] = tmp_bk;
 
     grid_entry_t tmp_e = fav_entry_cache[fa];
     fav_entry_cache[fa] = fav_entry_cache[fb];
@@ -1067,6 +1120,7 @@ static void swap_global_favs(menu_t *menu, int gi_a, int gi_b) {
 /* Reorder the selected favorite to position `to` via sequential adjacent swaps,
    so the games in between shift one step (iOS-home-screen style). */
 static void move_to(menu_t *menu, int to) {
+    if (grid_items != menu->bookkeeping.favorite_items) return;
     int from = sel_fav;
     int step = (to > from) ? 1 : -1;
     for (int j = from; j != to; j += step) swap_global_favs(menu, j, j + step);
@@ -1123,7 +1177,7 @@ static int az_order(char c) {
 static bool fav_needs_resort(menu_t *menu) {
     int prev = -1;
     for (int gi = 0; gi < fav_count; gi++) {
-        char si = menu->bookkeeping.favorite_items[fav_indices[gi]].sort_initial;
+        char si = grid_items[fav_indices[gi]].sort_initial;
         if (!si) return true;                 /* a favorite with no cached initial -> just added */
         int o = az_order(si);
         if (o < prev) return true;            /* out of order */
@@ -1132,7 +1186,73 @@ static bool fav_needs_resort(menu_t *menu) {
     return false;
 }
 
-static void refresh_favorites(menu_t *menu) {
+static void refresh_grid(menu_t *menu);   /* fwd decl (defined below; grid_switch_tab needs it) */
+
+/* Point grid_items/grid_items_cap at whichever tab is active. Clamps grid_tab back to
+   Favorites if it's gone stale (e.g. the active library was just unpinned) -- but the
+   placeholder (no libraries pinned, grid_tab == 1) is a permanent, intentional state, not a
+   stale one, so it must not fall through to Favorites. */
+static void grid_repoint_items(menu_t *menu) {
+    if (grid_tab > 0) {
+        if (library_count() == 0 && grid_tab == 1) {
+            grid_items     = NULL;   /* placeholder tab: no gallery, cap = 0 keeps it unreachable */
+            grid_items_cap = 0;
+            return;
+        }
+        library_t *lib = library_get(grid_tab - 1);
+        if (lib) {
+            /* lib->items is NULL until the first scan; grid_items_cap = 0 in that case
+               keeps every grid_items[...] access unreachable until it's populated. */
+            grid_items     = lib->items;
+            grid_items_cap = lib->items ? lib->count : 0;
+            return;
+        }
+        grid_tab = 0;   /* genuinely stale (e.g. mid-list unpin) -- fall through to Favorites */
+    }
+    grid_items     = menu->bookkeeping.favorite_items;
+    grid_items_cap = FAVORITES_COUNT;
+}
+
+/* Free every tile's cached info/art. The caches are keyed by position in whichever array
+   is active, so switching tabs must flush them -- a library's tile N would otherwise show
+   the previous tab's tile N stale art. */
+static void grid_flush_caches(void) {
+    for (int i = 0; i < FAVORITES_COUNT; i++) {
+        ui_components_boxart_free(boxart_cache[i]);
+        boxart_cache[i] = NULL;
+        fav_entry_cache[i].info_loaded = false;
+    }
+    memset(boxart_cache_attempted, 0, sizeof(boxart_cache_attempted));
+}
+
+/* Switch tabs (dir = +1 for R/tab_next, -1 for L/tab_prev), wrapping around Favorites and the
+   pinned libraries (or the placeholder, when none are pinned). The file browser is no longer
+   part of this cycle -- it's reached via the grid's Z-menu "File Browser" row instead. */
+static void grid_switch_tab(menu_t *menu, int dir) {
+    int lib_n = library_count();
+    int count = lib_n > 0 ? lib_n + 1 : 2;
+    grid_tab  = ((grid_tab + dir) % count + count) % count;
+
+    if (grid_tab > 0 && lib_n > 0) {
+        library_t *lib = library_get(grid_tab - 1);
+        if (lib && !lib->scanned) {
+            /* Draw the "Working..." box this frame; the scan itself runs next frame
+               (see the lib_scan_working check near the top of process()). */
+            lib_scan_working = true;
+            lib_scan_tab     = grid_tab;
+            return;
+        }
+    }
+
+    grid_flush_caches();
+    grid_repoint_items(menu);
+    refresh_grid(menu);
+    sel_fav    = 0;
+    scroll_row = 0;
+}
+
+static void refresh_grid(menu_t *menu) {
+    grid_repoint_items(menu);
     rebuild_fav_list(menu);
     if (sel_fav > fav_count - 1) sel_fav = fav_count - 1;
     if (sel_fav < 0) sel_fav = 0;
@@ -1174,13 +1294,21 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
     int inner_h = y1 - y0;
 
     if (b && !b->loading && b->image) {
+        /* Duplicate-art disambiguation: ROM hacks correctly match their base game's art (same
+           game code), so several hacks can render as identical tiles -- a filename caption tells
+           them apart. Always on for library tabs; opt-in for Favorites. */
+        bool show_caption = (grid_tab != 0) || grid_caption_favs;
+        int  cap_h = show_caption ? TILE_CAPTION_H : 0;
+        int  art_h = inner_h - cap_h;
+        if (art_h < 1) art_h = 1;
+
         float sx = (float)inner_w / b->image->width;
-        float sy = (float)inner_h / b->image->height;
+        float sy = (float)art_h / b->image->height;
         float scale = (sx < sy) ? sx : sy;
         int draw_w = (int)(b->image->width  * scale);
         int draw_h = (int)(b->image->height * scale);
         int off_x  = (inner_w - draw_w) / 2;
-        int off_y  = (inner_h - draw_h) / 2;
+        int off_y  = (art_h - draw_h) / 2;
 
         rdpq_mode_push();
             rdpq_set_mode_standard();
@@ -1189,6 +1317,32 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
             rdpq_tex_blit(b->image, x0 + off_x, y0 + off_y,
                           &(rdpq_blitparms_t){ .scale_x = scale, .scale_y = scale });
         rdpq_mode_pop();
+
+        if (show_caption) {
+            char cap[64] = "";
+            const char *fn = path_last_get(grid_items[fav_i].primary_path);
+            if (fn) {
+                strncpy(cap, fn, sizeof(cap) - 1);
+                cap[sizeof(cap) - 1] = '\0';
+                char *dot = strrchr(cap, '.');
+                if (dot) *dot = '\0';
+                sanitize_display_name(cap);
+            }
+            if (cap[0]) {
+                rdpq_text_printn(
+                    &(rdpq_textparms_t){
+                        .width   = inner_w,
+                        .height  = cap_h,
+                        .align   = ALIGN_CENTER,
+                        .valign  = VALIGN_CENTER,
+                        .wrap    = WRAP_ELLIPSES,
+                    },
+                    FNT_DEFAULT,
+                    x0, y0 + art_h,
+                    cap, strlen(cap)
+                );
+            }
+        }
     } else {
         /* No art: show the display name — prefer the looked-up name (meta_name:
            DB name, or the ROM header title fetched for no-art tiles), else the raw
@@ -1264,7 +1418,7 @@ static void gm_load_inspect_boxart(menu_t *menu, int fav_i) {
     gm_free_inspect_boxart();
     insp_boxart_fav = fav_i;
     if (!art_can_fit()) return;   /* leave NULL -> placeholder; fragmentation-safe */
-    int iv_ovr = rom_config_get_image_view(menu->bookkeeping.favorite_items[fav_i].primary_path, 1);
+    int iv_ovr = rom_config_get_image_view(grid_items[fav_i].primary_path, 1);
     int iv = (iv_ovr >= 0 && iv_ovr < GRID_IMAGE_COUNT) ? iv_ovr : menu->settings.image_view_inspect;
     file_image_type_t img_type = ui_components_boxart_view_to_type(iv);
     /* presents_as region only matters for box front/back; other types aren't region-specific. */
@@ -1277,7 +1431,7 @@ static void gm_load_inspect_boxart(menu_t *menu, int fav_i) {
     insp_boxart = ui_components_boxart_init(
         menu->storage_prefix, eff_gc,
         fav_entry_cache[fav_i].title,
-        path_get(menu->bookkeeping.favorite_items[fav_i].primary_path),
+        path_get(grid_items[fav_i].primary_path),
         img_type, menu->settings.use_custom_files);
 }
 
@@ -1295,7 +1449,7 @@ static void draw_inspect(menu_t *menu) {
 
     if (fav_i != inspect_fav_i_cached) {
         inspect_fav_i_cached = fav_i;
-        bookkeeping_item_t *item = &menu->bookkeeping.favorite_items[fav_i];
+        bookkeeping_item_t *item = &grid_items[fav_i];
         if (item->primary_path && path_has_value(item->primary_path)) {
             inspect_has_custom = rom_custom_load(
                 menu->storage_prefix,
@@ -1337,18 +1491,18 @@ static void draw_inspect(menu_t *menu) {
            "Unknown") for blank-header ROMs: iQue ports, protos, homebrew, Aleck64 carts, etc.
            (game_display_name strips region/version tags + sanitizes on render.) */
         if (!inspect_has_meta && !ec->meta_name[0])
-            fav_name_from_filename(menu->bookkeeping.favorite_items[fav_i].primary_path,
+            fav_name_from_filename(grid_items[fav_i].primary_path,
                                    ec->meta_name, sizeof(ec->meta_name));
         /* Flag non-N64 hardware variants (may not run on a stock N64 / SC64). Filename first;
            a 'Z'-media game code (Seta Aleck64) is a reliable secondary signal. */
         inspect_platform = game_platform_classify(
-            path_last_get(menu->bookkeeping.favorite_items[fav_i].primary_path));
+            path_last_get(grid_items[fav_i].primary_path));
         if (inspect_platform == GAME_PLATFORM_N64 && ec->game_code[0] == 'Z')
             inspect_platform = GAME_PLATFORM_ALECK64;
         /* Demo / proto / beta builds: flagged from the filename so a missing cover
            reads as expected (these rarely have their own art). */
         inspect_build = game_build_classify(
-            path_last_get(menu->bookkeeping.favorite_items[fav_i].primary_path));
+            path_last_get(grid_items[fav_i].primary_path));
     }
     grid_entry_t *e = &fav_entry_cache[fav_i];
 
@@ -1583,8 +1737,8 @@ static void draw_inspect(menu_t *menu) {
     }
 
     /* ---- Action bar (replaces grid action bar while inspect is open) — standardized
-       fixed slots so C/R line up with the grid bar behind it. ---- */
-    ui_components_actions_bar_buttons_draw("A: Launch", "B: Back", NULL, "C: Scroll", "R: Menu");
+       fixed slots so C/Z line up with the grid bar behind it. ---- */
+    ui_components_actions_bar_buttons_draw("A: Launch", "B: Back", NULL, "C: Scroll", "Z: Menu");
 }
 
 /* Destructive-action confirmation drawn on top of the inspect dialog.
@@ -1644,15 +1798,27 @@ static void draw_confirm_remove(menu_t *menu) {
 }
 
 static void launch_favorite(menu_t *menu, int fav_i, bool direct) {
-    menu->load.load_favorite_id = fav_i;
+    /* On a library tab, fav_i indexes the library's item array, not favorites -- load_rom.c
+       and load_disk.c both resolve load_favorite_id against menu->bookkeeping.favorite_items,
+       so that index would be meaningless (or point at an unrelated favorite) there. Instead
+       hand the loader the path directly via rom_path/library_disk_path and leave
+       load_favorite_id at -1, with load_return_mode/from_grid standing in for what
+       load_favorite_id normally tells leave_view()/launch_origin_mode about where to return. */
+    bool from_library = (grid_tab != 0);
+    bookkeeping_item_t *bk = &grid_items[fav_i];
+
     menu->load.load_history_id  = -1;
+    menu->load.load_favorite_id = from_library ? -1 : fav_i;
+    if (from_library) {
+        menu->load.load_return_mode = MENU_MODE_GAMES_GRID;
+        menu->load.from_grid        = true;
+    }
+
     /* 64DD disk favorites go to the DISK loader, which reads the disk and its linked base
        ROM (the favorite's secondary path) via load_favorite_id -- the ROM loader can't boot
        a .ndd. From there A launches the disk (Z = combined disk+ROM for games like the
        F-Zero X Expansion Kit). */
-    if (fav_i >= 0 && fav_i < FAVORITES_COUNT &&
-        menu->bookkeeping.favorite_items[fav_i].bookkeeping_type == BOOKKEEPING_TYPE_DISK) {
-        bookkeeping_item_t *bk = &menu->bookkeeping.favorite_items[fav_i];
+    if (fav_i >= 0 && fav_i < grid_items_cap && bk->bookkeeping_type == BOOKKEEPING_TYPE_DISK) {
         /* An E-prefix 64DD code is an EXPANSION disk (e.g. EFZJ = F-Zero X Expansion Kit):
            it needs its base cartridge. If this favorite isn't linked to a ROM yet, divert to
            the cart picker instead of booting standalone (which would just black-screen). */
@@ -1683,18 +1849,55 @@ static void launch_favorite(menu_t *menu, int fav_i, bool direct) {
             if (base >= 0) {
                 disclink_store(menu->storage_prefix, bk->game_code,
                                path_get(menu->bookkeeping.favorite_items[base].primary_path));
+                if (from_library) {
+                    if (menu->load.library_disk_path) path_free(menu->load.library_disk_path);
+                    menu->load.library_disk_path = path_clone(bk->primary_path);
+                }
                 menu->next_mode = MENU_MODE_LOAD_DISK;   /* now linked -> boots combined */
                 return;
             }
-            /* No clear favorite base -> pick it in the file browser (link-pick mode). */
+            /* No clear favorite base -> pick it in the file browser (link-pick mode). Its
+               resume path (finish_link_pick) is keyed by a real favorites index, and always
+               leaves the disc as a tracked favorite once linked anyway -- so from a library
+               tab, find-or-add this disk to favorites first rather than teach link-pick a
+               second, library-flavored resume path. */
+            if (from_library) {
+                int real_fi = -1;
+                for (int k = 0; k < FAVORITES_COUNT; k++) {
+                    bookkeeping_item_t *f = &menu->bookkeeping.favorite_items[k];
+                    if (f->bookkeeping_type != BOOKKEEPING_TYPE_EMPTY && f->primary_path &&
+                        path_are_match(bk->primary_path, f->primary_path)) { real_fi = k; break; }
+                }
+                if (real_fi < 0) {
+                    bookkeeping_favorite_add(&menu->bookkeeping, bk->primary_path, bk->secondary_path,
+                                              BOOKKEEPING_TYPE_DISK);
+                    real_fi = 0;   /* insert_top places the new entry at index 0 */
+                }
+                fav_i = real_fi;
+                bk    = &menu->bookkeeping.favorite_items[fav_i];
+            }
             char dname[64];
             fav_name_from_filename(bk->primary_path, dname, sizeof dname);
             view_browser_request_link_pick(dname, bk->game_code, fav_i);
             menu->next_mode = MENU_MODE_BROWSER;
             return;
         }
+        if (from_library) {
+            if (menu->load.library_disk_path) path_free(menu->load.library_disk_path);
+            menu->load.library_disk_path = path_clone(bk->primary_path);
+        }
         menu->next_mode = MENU_MODE_LOAD_DISK;
         return;
+    }
+
+    if (from_library) {
+        /* NOT rom_path directly: menu->browser.entry is never reset to NULL on leaving the
+           browser (and pinning a folder requires having visited it at least once), so
+           view_load_rom_init's browser.entry branch would silently overwrite rom_path with a
+           stale browser path before this one was ever read. library_rom_path is checked (and
+           consumed) there BEFORE the browser.entry fallback -- see menu_state.h. */
+        if (menu->load.library_rom_path) path_free(menu->load.library_rom_path);
+        menu->load.library_rom_path = path_clone(bk->primary_path);
     }
     if (direct) {
         menu->load_pending.rom_file = true;
@@ -1719,6 +1922,8 @@ static void gm_gs_update_labels(menu_t *menu) {
              "Tile: %s", menu->settings.grid_square_tiles ? "Square" : "Box");
     snprintf(gm_gs_tile_lbl, sizeof(gm_gs_tile_lbl), "Tile size: %s",
              menu->settings.grid_large_tiles ? "Large" : "Small");
+    snprintf(gm_gs_caption_lbl, sizeof(gm_gs_caption_lbl), "Favorites captions: %s",
+             menu->settings.grid_show_captions_favorites ? "On" : "Off");
 }
 
 static void gm_rebuild_history(menu_t *menu) {
@@ -1754,13 +1959,32 @@ static void gm_rebuild_history(menu_t *menu) {
     ui_components_context_menu_init(&gm_hist_cm);
 }
 
-/* Find the favorites-array index of grid_more_target (or -1 if not a favorite). */
+/* Find the favorites-array index of grid_more_target (or -1 if not a favorite). Always
+   searches the REAL favorites, regardless of which tab is active -- used only for the
+   favorites.ini presents_as cache, which has no equivalent on a (read-only) library tab. */
 static int gm_target_fav_index(menu_t *menu) {
     if (!grid_more_target) return -1;
     for (int k = 0; k < FAVORITES_COUNT; k++) {
         bookkeeping_item_t *f = &menu->bookkeeping.favorite_items[k];
         if (f->bookkeeping_type != BOOKKEEPING_TYPE_EMPTY && f->primary_path &&
             path_are_match(grid_more_target, f->primary_path)) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+/* Find grid_more_target's index in the ACTIVE tab's items (grid_items), or -1. Unlike
+   gm_target_fav_index(), this is the right index for invalidating the tile caches
+   (fav_entry_cache/boxart_cache are keyed by position in whichever array is active) --
+   using the favorites-index there instead would flush the wrong tile's cache whenever the
+   targeted ROM is a favorite but the active tab is a library. */
+static int gm_target_grid_index(menu_t *menu) {
+    (void)menu;
+    if (!grid_more_target) return -1;
+    for (int k = 0; k < grid_items_cap; k++) {
+        if (grid_items[k].bookkeeping_type != BOOKKEEPING_TYPE_EMPTY && grid_items[k].primary_path &&
+            path_are_match(grid_more_target, grid_items[k].primary_path)) {
             return k;
         }
     }
@@ -1797,16 +2021,39 @@ static void gm_update_dynamic_labels(menu_t *menu) {
     gm_gs_update_labels(menu);
     gm_pa_update_labels();
     gm_rebuild_history(menu);
-    /* The toggle is deferred (committed on menu dismiss), so show the count the list WILL
-       have once the pending change applies: +1 for a pending add, -1 for a pending remove,
-       else the current count. */
-    bool cur_fav = (gm_target_fav_index(menu) >= 0);
-    int shown = fav_count + ((grid_more_is_fav && !cur_fav) ? 1 : 0)
-                          - ((!grid_more_is_fav && cur_fav) ? 1 : 0);
-    snprintf(gm_fav_lbl, sizeof(gm_fav_lbl), "%s %d/%d",
-             grid_more_is_fav ? "Unfavorite" : "Favorite", shown, FAVORITES_COUNT);
-    snprintf(gm_autosort_lbl, sizeof(gm_autosort_lbl), "Always sort A-Z: %s",
-             menu->settings.always_sort_az ? "Yes" : "No");
+    if (grid_tab != 0) {
+        /* Library tab: a one-way "Add to Favorites" (see gm_fav_toggle), not the
+           Favorite/Unfavorite toggle -- this tab isn't the favorites list itself. */
+        bool already = (gm_target_fav_index(menu) >= 0);
+        snprintf(gm_fav_lbl, sizeof(gm_fav_lbl), "%s", already ? "Already a Favorite" : "Add to Favorites");
+    } else {
+        /* The toggle is deferred (committed on menu dismiss), so show the count the list WILL
+           have once the pending change applies: +1 for a pending add, -1 for a pending remove,
+           else the current count. */
+        bool cur_fav = (gm_target_fav_index(menu) >= 0);
+        int shown = fav_count + ((grid_more_is_fav && !cur_fav) ? 1 : 0)
+                              - ((!grid_more_is_fav && cur_fav) ? 1 : 0);
+        snprintf(gm_fav_lbl, sizeof(gm_fav_lbl), "%s %d/%d",
+                 grid_more_is_fav ? "Unfavorite" : "Favorite", shown, FAVORITES_COUNT);
+    }
+    if (grid_tab != 0) {
+        /* Favorites-only tools: blank text = the row is skipped/hidden (see
+           ui_components/context_menu.c's empty-text-is-a-separator convention). A
+           library tab is a read-only gallery, not the favorites list. */
+        gm_sort_lbl[0]     = '\0';
+        gm_clear_lbl[0]    = '\0';
+        gm_autosort_lbl[0] = '\0';
+        strncpy(gm_rescan_lbl, "Rescan library", sizeof(gm_rescan_lbl) - 1);
+        gm_rescan_lbl[sizeof(gm_rescan_lbl) - 1] = '\0';
+    } else {
+        strncpy(gm_sort_lbl, "Run Once: Sort A-Z", sizeof(gm_sort_lbl) - 1);
+        gm_sort_lbl[sizeof(gm_sort_lbl) - 1] = '\0';
+        strncpy(gm_clear_lbl, "Clear all favorites", sizeof(gm_clear_lbl) - 1);
+        gm_clear_lbl[sizeof(gm_clear_lbl) - 1] = '\0';
+        snprintf(gm_autosort_lbl, sizeof(gm_autosort_lbl), "Always sort A-Z: %s",
+                 menu->settings.always_sort_az ? "Yes" : "No");
+        gm_rescan_lbl[0] = '\0';
+    }
 }
 
 /* Close the More menu and clean up the target path */
@@ -1820,12 +2067,14 @@ static void gm_close(void) {
 static void gm_open(menu_t *menu, bool from_inspect) {
     if (fav_count == 0 || sel_fav < 0 || sel_fav >= fav_count) return;
     int fav_i = fav_indices[sel_fav];
-    bookkeeping_item_t *bi = &menu->bookkeeping.favorite_items[fav_i];
+    bookkeeping_item_t *bi = &grid_items[fav_i];
     if (!bi->primary_path) return;
 
     if (grid_more_target) path_free(grid_more_target);
     grid_more_target       = path_clone(bi->primary_path);
-    grid_more_is_fav       = true;
+    /* On Favorites this is always true (the tile IS a favorite); on a library tab the
+       tile may or may not also be a real favorite, so check rather than assume. */
+    grid_more_is_fav       = (gm_target_fav_index(menu) >= 0);
     grid_more_from_inspect = from_inspect;
     grid_more_active       = true;
 
@@ -1850,7 +2099,7 @@ static void gm_launch(menu_t *menu, void *arg) {
     if (fi < 0) {
         /* Was unfavorited — re-add temporarily, then launch */
         bookkeeping_favorite_add(&menu->bookkeeping, grid_more_target, NULL, BOOKKEEPING_TYPE_ROM);
-        refresh_favorites(menu);
+        refresh_grid(menu);
         /* Find the new fav_i */
         for (int k = 0; k < FAVORITES_COUNT; k++) {
             bookkeeping_item_t *f = &menu->bookkeeping.favorite_items[k];
@@ -1876,7 +2125,9 @@ static void gm_launch(menu_t *menu, void *arg) {
 static void gm_fav_toggle(menu_t *menu, void *arg) {
     (void)arg;
     if (!grid_more_target) return;
-    grid_more_is_fav = !grid_more_is_fav;
+    /* Library tab: one-way "Add to Favorites" -- this row never removes an existing
+       favorite from a read-only library tab (see gm_update_dynamic_labels). */
+    grid_more_is_fav = (grid_tab != 0) ? true : !grid_more_is_fav;
     gm_update_dynamic_labels(menu);   /* label + count reflect the pending state */
     gm_fav_fired = true;              /* reopen the menu so the new label shows */
     sound_play_effect(SFX_SETTING);
@@ -1896,7 +2147,7 @@ static void gm_apply_pending_fav(menu_t *menu) {
         bookkeeping_favorite_remove(&menu->bookkeeping, fi);
     }
     bookkeeping_save(&menu->bookkeeping);
-    refresh_favorites(menu);
+    refresh_grid(menu);
     compute_flow();
     if (sel_fav >= fav_count) sel_fav = (fav_count > 0) ? fav_count - 1 : 0;
     ensure_visible();
@@ -1915,7 +2166,7 @@ static void gm_game_settings(menu_t *menu, void *arg) {
     if (fi < 0) {
         /* Not currently a fav — add it so load_rom can access the ROM */
         bookkeeping_favorite_add(&menu->bookkeeping, grid_more_target, NULL, BOOKKEEPING_TYPE_ROM);
-        refresh_favorites(menu);
+        refresh_grid(menu);
         for (int k = 0; k < FAVORITES_COUNT; k++) {
             bookkeeping_item_t *f = &menu->bookkeeping.favorite_items[k];
             if (f->bookkeeping_type != BOOKKEEPING_TYPE_EMPTY && f->primary_path &&
@@ -2040,7 +2291,7 @@ static void gm_reset_all_caches(menu_t *menu) {
     }
     sel_fav = 0;
     scroll_row = 0;
-    refresh_favorites(menu);
+    refresh_grid(menu);
 }
 
 /* ---- Favorites submenu: Sort A-Z + Clear all ---- */
@@ -2126,6 +2377,9 @@ static void gm_fav_sort_key(menu_t *menu, bookkeeping_item_t *it, char *out, siz
 /* Sort the favorites list alphabetically by display name (case-insensitive),
    empty slots last, then persist. Blocking — run behind the "Working..." box. */
 static void gm_run_sort_az(menu_t *menu) {
+    /* Belt-and-braces: this always sorts the REAL favorites, never a library tab's
+       items, regardless of what UI gating did or didn't prevent reaching here. */
+    if (grid_items != menu->bookkeeping.favorite_items) return;
     bookkeeping_t *bk = &menu->bookkeeping;
     for (int i = 0; i < FAVORITES_COUNT; i++) {
         /* Abort: B held during this (blocking, SD-read-heavy) key derivation bails BEFORE the
@@ -2177,7 +2431,10 @@ static void gm_fav_sort(menu_t *menu, void *arg) {
 }
 
 static void gm_fav_clear(menu_t *menu, void *arg) {
-    (void)menu; (void)arg;
+    (void)arg;
+    /* Belt-and-braces: never arm the confirm on a library tab (unreachable via the menu
+       anyway -- see gm_clear_lbl -- but this is a destructive op, so check again here). */
+    if (grid_items != menu->bookkeeping.favorite_items) return;
     gm_gs_row = GM_GS_ROW_CLEAR;
     show_confirm_clear = true;
 }
@@ -2196,6 +2453,25 @@ static void gm_fav_toggle_autosort(menu_t *menu, void *arg) {
         /* Turning ON: confirm + recommend disabling custom files. */
         show_confirm_autosort = true;  /* the context menu closes; confirm takes over */
     }
+}
+
+/* Re-scan the active library's folder from scratch (the escape hatch for the
+   scan-once-per-boot cache -- e.g. after adding/removing ROMs on the SD card). No-op
+   (and hidden -- see gm_rescan_lbl) off a library tab. */
+static void gm_rescan_library(menu_t *menu, void *arg) {
+    (void)arg;
+    if (grid_tab == 0) return;
+    library_t *lib = library_get(grid_tab - 1);
+    if (!lib) return;
+    library_free_items(lib);
+    library_scan(lib);
+    grid_flush_caches();
+    grid_repoint_items(menu);
+    refresh_grid(menu);
+    sel_fav    = 0;
+    scroll_row = 0;
+    gm_close();
+    sound_play_effect(SFX_SETTING);
 }
 
 static void gm_gs_cycle_grid(menu_t *menu, void *arg) {
@@ -2243,6 +2519,15 @@ static void gm_gs_toggle_tile(menu_t *menu, void *arg) {
     grid_large = menu->settings.grid_large_tiles;
     gm_gs_update_labels(menu);
 }
+/* Favorites-tab caption opt-in (library tabs always show captions regardless of this). */
+static void gm_gs_toggle_caption(menu_t *menu, void *arg) {
+    gm_gs_row = (int)(intptr_t)arg;
+    gm_gs_fired = true;
+    menu->settings.grid_show_captions_favorites = !menu->settings.grid_show_captions_favorites;
+    settings_save(&menu->settings);
+    grid_caption_favs = menu->settings.grid_show_captions_favorites;
+    gm_gs_update_labels(menu);
+}
 /* Global "Game art" region default. Reopens Grid settings at the Game art row, then
    re-resolves every tile (box art + portrait/landscape orientation can change). */
 static void gm_gs_set_region(menu_t *menu, void *arg) {
@@ -2265,7 +2550,7 @@ static void gm_gs_set_region(menu_t *menu, void *arg) {
    per-game changes don't touch the grid tile, so they must not flash it. */
 static void gm_pa_refresh_target(menu_t *menu, bool affects_grid) {
     if (affects_grid) {
-        int fav_i = gm_target_fav_index(menu);
+        int fav_i = gm_target_grid_index(menu);
         if (fav_i >= 0) gm_invalidate_one_art(fav_i, true);   /* view-type change: keep info, no disk re-read */
         compute_flow();
     }
@@ -2285,8 +2570,9 @@ static void gm_set_region(menu_t *menu, void *arg) {
     if (fav_i >= 0) {
         menu->bookkeeping.favorite_items[fav_i].presents_as = (int)presents;
         bookkeeping_save_favorites(&menu->bookkeeping);
-        fav_entry_cache[fav_i].info_loaded = false;
     }
+    int gi = gm_target_grid_index(menu);
+    if (gi >= 0) fav_entry_cache[gi].info_loaded = false;
     insp_boxart_fav = -1;               /* region changes box front/back -> reload inspect cover */
     gm_pa_refresh_target(menu, true);   /* region affects the grid (box art + orientation) */
     sound_play_effect(SFX_SETTING);
@@ -2320,8 +2606,9 @@ static void gm_pa_reset(menu_t *menu, void *arg) {
     if (fav_i >= 0) {
         menu->bookkeeping.favorite_items[fav_i].presents_as = 0;   /* AUTO */
         bookkeeping_save_favorites(&menu->bookkeeping);
-        fav_entry_cache[fav_i].info_loaded = false;
     }
+    int gi = gm_target_grid_index(menu);
+    if (gi >= 0) fav_entry_cache[gi].info_loaded = false;
     insp_boxart_fav = -1;   /* reset to defaults -> reload inspect cover too */
     gm_pa_refresh_target(menu, true);
     sound_play_effect(SFX_SETTING);
@@ -2543,13 +2830,35 @@ static bool ss_plain_grid(void) {
     return !splash_active && !fav_working;
 }
 
+/* Real (tab-independent) favorites count/lookup, for the screensaver's "favorites only"
+   mode -- deliberately NOT fav_count/grid_items, which reflect whichever tab is active. */
+static int real_favorites_count(menu_t *menu) {
+    int n = 0;
+    for (int k = 0; k < FAVORITES_COUNT; k++) {
+        if (menu->bookkeeping.favorite_items[k].bookkeeping_type != BOOKKEEPING_TYPE_EMPTY) n++;
+    }
+    return n;
+}
+static bookkeeping_item_t *real_favorite_at(menu_t *menu, int idx) {
+    for (int k = 0; k < FAVORITES_COUNT; k++) {
+        bookkeeping_item_t *f = &menu->bookkeeping.favorite_items[k];
+        if (f->bookkeeping_type == BOOKKEEPING_TYPE_EMPTY) continue;
+        if (idx-- == 0) return f;
+    }
+    return NULL;
+}
+
 /* Load a random baked library cover (front art). Returns NULL on OOM or if the
    randomly-chosen game has no baked art (caller leaves the slot empty and retries). */
 static component_boxart_t *ss_load_random(menu_t *menu) {
-    /* "Favorite Screensaver" pulls only from the user's favorited games (when they have
-       any); otherwise (and on an empty grid) it pulls from the whole baked library. */
-    bool fav_only = menu->settings.screensaver_favorites_only && fav_count > 0;
-    int pool = fav_only ? fav_count : game_metadata_db_count();
+    /* "Favorite Screensaver" pulls only from the user's REAL favorited games (when they
+       have any) -- deliberately tab-independent (real_favorites_count/_at, not
+       fav_count/grid_items), so it means the same thing while browsing a library tab as
+       it does on Favorites; otherwise (and on an empty grid) it pulls from the whole
+       baked library. */
+    int rfc = real_favorites_count(menu);
+    bool fav_only = menu->settings.screensaver_favorites_only && rfc > 0;
+    int pool = fav_only ? rfc : game_metadata_db_count();
     if (pool <= 0) return NULL;
     for (int tries = 0; tries < 10; tries++) {
         if (!art_can_fit()) return NULL;   /* fragmentation-safe guard: a contiguous cover block must exist (total-free is blind to fragmentation) */
@@ -2557,7 +2866,8 @@ static component_boxart_t *ss_load_random(menu_t *menu) {
         int idx = (int)((ss_rng >> 9) % (uint32_t)pool);
         char code[5];
         if (fav_only) {
-            const char *gc = menu->bookkeeping.favorite_items[fav_indices[idx]].game_code;
+            bookkeeping_item_t *rf = real_favorite_at(menu, idx);
+            const char *gc = rf ? rf->game_code : NULL;
             if (!gc || !gc[0]) continue;          /* unknown code -> retry another favorite */
             /* Use this favorite's base code with a RANDOM region byte so the marquee shows ALL
                regional cover variants (US/JP/EU) of the favorited titles. try_dfs_sprite tries
@@ -2707,18 +3017,18 @@ static char az_initial(menu_t *menu, int gi) {
        non-DB games, which the lookups below can't resolve without an SD read). Valid only
        while the favorite count matches the sorted set (an add/remove desyncs it). */
     if (az_letter_ready && fav_count == az_letter_count &&
-        fav_i >= 0 && fav_i < FAVORITES_COUNT && az_letter[fav_i]) {
+        fav_i >= 0 && fav_i < grid_items_cap && az_letter[fav_i]) {
         return az_letter[fav_i];
     }
     /* Persisted initial from the last sort (survives boots that skipped the re-sort). */
-    if (fav_i >= 0 && fav_i < FAVORITES_COUNT &&
-        menu->bookkeeping.favorite_items[fav_i].sort_initial) {
-        return menu->bookkeeping.favorite_items[fav_i].sort_initial;
+    if (fav_i >= 0 && fav_i < grid_items_cap &&
+        grid_items[fav_i].sort_initial) {
+        return grid_items[fav_i].sort_initial;
     }
     char buf[64];
     const char *nm = NULL;
     game_meta_t m;
-    const char *code = menu->bookkeeping.favorite_items[fav_i].game_code;
+    const char *code = grid_items[fav_i].game_code;
     if (code[0] && game_metadata_db_lookup(code, &m) && m.title && m.title[0]) {
         nm = m.title;                                        /* same source as the sort */
     } else {
@@ -2756,7 +3066,7 @@ static int az_jump(menu_t *menu, int dir) {
 /* Greeting opt-in /Favorites import — state shared by process()/draw(); the scan/step/
    finish/popup helpers are defined further down (after draw()). Replaces the old
    every-boot auto-scan: enumeration only runs when the user presses R on the greeting. */
-static bool     gs_can_scan   = false;  /* importable folder present -> greeting offers R: Scan */
+static bool     gs_can_scan   = false;  /* importable folder present -> greeting offers S/Z: Scan */
 static char     gs_folder[16] = "";     /* "Favorites" / "Favourites" (label) */
 static bool     gs_pending    = false;  /* user pressed R -> run */
 static bool     gs_working    = false;  /* popup is up */
@@ -2780,7 +3090,7 @@ static void process(menu_t *menu) {
     /* Deferred History fav/unfav: re-flow the grid ONCE, only after all overlays are closed,
        so toggling favorites in the History panel doesn't churn the grid live behind it. */
     if (gm_fav_dirty && !grid_more_active && !show_history && !show_inspect) {
-        refresh_favorites(menu);
+        refresh_grid(menu);
         gm_fav_dirty = false;
     }
 
@@ -2799,9 +3109,10 @@ static void process(menu_t *menu) {
         bool input = ss_any_input(menu);
 
         /* Hidden manual trigger: hold L+R together for ~5 s on the plain grid. While
-           both are held, swallow their normal actions (R=menu, L/Z=context) and don't
-           count the hold as activity, so the gesture completes cleanly. Press them
-           together (if R registers first it opens the menu and the gesture won't fire). */
+           both are held, swallow their normal actions (L=lz_context/tab_prev,
+           R=tab_next) and don't count the hold as activity, so the gesture completes
+           cleanly. Press them together (if one registers first it fires a tab switch
+           before the gesture accumulates). */
         uint32_t now = (uint32_t)get_ticks_ms();
         if (ss_idle_last_ms == 0) ss_idle_last_ms = now;   /* init on first frame */
 
@@ -2814,6 +3125,8 @@ static void process(menu_t *menu) {
             ss_plain_grid()) {
             menu->actions.options    = false;
             menu->actions.lz_context = false;
+            menu->actions.tab_next   = false;
+            menu->actions.tab_prev   = false;
             input = false;
             if (ss_lr_start_ms == 0) ss_lr_start_ms = now;          /* hold began */
             else if (now - ss_lr_start_ms >= SS_LR_MS) { ss_activate(menu); return; }
@@ -3033,6 +3346,30 @@ static void process(menu_t *menu) {
         return;
     }
 
+    /* -------- Library scan staging: the "Working..." box was drawn last frame; run the
+       (fast, in-memory, no-header-reads) scan now and land on the new tab. -------- */
+    if (lib_scan_working) {
+        library_t *lib = library_get(lib_scan_tab - 1);
+        if (lib) library_scan(lib);
+        lib_scan_working = false;
+        grid_flush_caches();
+        grid_repoint_items(menu);
+        refresh_grid(menu);
+        sel_fav    = 0;
+        scroll_row = 0;
+        return;
+    }
+
+    /* -------- Tab switching: Favorites <-> pinned libraries <-> Files --------
+       Suppressed while inspect/move-mode/a confirm popup owns input (those are all
+       gated behind show_inspect or move_mode below), and while the More menu or any
+       modal above is open (already returned by this point). */
+    if (!show_inspect && !move_mode && (menu->actions.tab_next || menu->actions.tab_prev)) {
+        grid_switch_tab(menu, menu->actions.tab_next ? 1 : -1);
+        sound_play_effect(SFX_CURSOR);
+        return;
+    }
+
     /* -------- INSPECT POPUP (modal) -------- */
     if (show_inspect) {
         if (fav_count == 0) { show_inspect = false; return; }
@@ -3046,7 +3383,7 @@ static void process(menu_t *menu) {
 
         if (menu->actions.enter || menu->actions.settings) {
             int fav_i = fav_indices[sel_fav];
-            path_t *rom_p = menu->bookkeeping.favorite_items[fav_i].primary_path;
+            path_t *rom_p = grid_items[fav_i].primary_path;
             if (!rom_p || !file_exists(path_get(rom_p))) {
                 menu_show_error(menu, "ROM file not found on SD card.");
             } else {
@@ -3081,28 +3418,32 @@ static void process(menu_t *menu) {
 
     /* -------- EMPTY LIST -------- */
     if (fav_count == 0) {
-        /* Greeting "Scan SD:/Favorites" import — incremental so the popup animates.
-           Frame 1: show the box. Frame 2: enumerate. Then a few ROMs per frame. */
-        if (gs_pending) {
-            if (!gs_working) { gs_working = true; return; }   /* draw the box first */
-            if (!gs_scanned) { gs_scan(menu); return; }        /* draw 0% before mutating */
-            gs_step(menu, 8);
-            if (gs_done >= gs_total) gs_finish(menu);
-            return;
-        }
-        /* When a Favorites folder exists, auto-import it a short moment AFTER the greeting
-           first appears (so the user sees the greet, then the scan runs in the background
-           while they read). S launches into the grid right away; R still works too. */
-        if (gs_can_scan && !gs_scanned) {
-            /* Wait for the user: S (or R) starts the import and launches into the grid.
-               No auto-start -- the greeting stays up until they choose. */
-            if (menu->actions.settings || menu->actions.options) {
-                gs_pending = true;
-                sound_play_effect(SFX_SETTING);
+        /* The /Favorites-folder greeting/import is Favorites-only -- a library tab has no
+           equivalent "well-known folder" to offer, it's just empty until pinned ROMs show up. */
+        if (grid_tab == 0) {
+            /* Greeting "Scan SD:/Favorites" import — incremental so the popup animates.
+               Frame 1: show the box. Frame 2: enumerate. Then a few ROMs per frame. */
+            if (gs_pending) {
+                if (!gs_working) { gs_working = true; return; }   /* draw the box first */
+                if (!gs_scanned) { gs_scan(menu); return; }        /* draw 0% before mutating */
+                gs_step(menu, 8);
+                if (gs_done >= gs_total) gs_finish(menu);
+                return;
             }
-            return;
+            /* When a Favorites folder exists, auto-import it a short moment AFTER the greeting
+               first appears (so the user sees the greet, then the scan runs in the background
+               while they read). S launches into the grid right away; Z still works too. */
+            if (gs_can_scan && !gs_scanned) {
+                /* Wait for the user: S (or Z) starts the import and launches into the grid.
+                   No auto-start -- the greeting stays up until they choose. */
+                if (menu->actions.settings || menu->actions.options) {
+                    gs_pending = true;
+                    sound_play_effect(SFX_SETTING);
+                }
+                return;
+            }
         }
-        if (menu->actions.options) {           /* R: no folder -> open the file browser */
+        if (menu->actions.options) {           /* Z: no folder -> open the file browser */
             view_browser_open_popup(menu);     /* the shrink-wrapped file popup */
             sound_play_effect(SFX_CURSOR);
         }
@@ -3120,7 +3461,7 @@ static void process(menu_t *menu) {
                 int fav_i = fav_indices[sel_fav];
                 cache_compact_after_remove(fav_i);
                 bookkeeping_favorite_remove(&menu->bookkeeping, fav_i);
-                refresh_favorites(menu);
+                refresh_grid(menu);
                 compute_flow();
                 if (fav_count == 0) {
                     bookkeeping_save(&menu->bookkeeping);
@@ -3157,13 +3498,14 @@ static void process(menu_t *menu) {
 
     /* -------- B hold detection: 30 frames → move mode --------
        Disabled while "Always sort A-Z" is on: manual ordering would just be
-       undone on the next grid entry, so we hide the affordance entirely. */
+       undone on the next grid entry, so we hide the affordance entirely. Also disabled
+       on a library tab -- a library is a read-only gallery, not a list you reorder. */
     joypad_buttons_t bh = {0};
     JOYPAD_PORT_FOREACH(port) {
         bh = joypad_get_buttons_held(port);
         if (bh.raw) break;
     }
-    if (bh.b && !menu->settings.always_sort_az) {
+    if (bh.b && !menu->settings.always_sort_az && grid_tab == 0) {
         b_held_frames++;
         if (b_held_frames == MOVE_HOLD_FRAMES) {
             move_mode     = true;
@@ -3187,7 +3529,7 @@ static void process(menu_t *menu) {
         desc_scroll           = 0;
         sound_play_effect(SFX_GRID_ENTER);
     } else if (menu->actions.options) {
-        /* R: open the universal More menu as an overlay on the grid */
+        /* Z: open the universal More menu as an overlay on the grid */
         if (fav_count > 0) {
             sound_play_effect(SFX_SETTING);
             gm_open(menu, false);
@@ -3327,7 +3669,53 @@ static void draw(menu_t *menu, surface_t *d) {
         return;
     }
 
-    if (fav_count == 0) {
+    /* Tab bar is always shown: Favorites plus either the pinned libraries or a single
+       placeholder tab explaining how to pin one. */
+    int grid_tab_n = grid_tab_count();
+    {
+        const char *tab_labels[LIBRARIES_MAX + 1];
+        int lib_n = library_count();
+        tab_labels[0] = "Favorites";
+        if (lib_n == 0) {
+            tab_labels[1] = "+ Library";
+        } else {
+            for (int i = 0; i < lib_n; i++) {
+                library_t *lib = library_get(i);
+                tab_labels[1 + i] = (lib && lib->name[0]) ? lib->name : "Library";
+            }
+        }
+        float tab_w = (float)VISIBLE_AREA_WIDTH / (float)grid_tab_n;
+        ui_components_tabs_draw(tab_labels, grid_tab_n, grid_tab, tab_w);
+    }
+
+    if (lib_scan_working) {
+        ui_components_messagebox_draw("Loading library...");
+        rdpq_detach_show();
+        return;
+    }
+
+    if (fav_count == 0 && grid_tab != 0) {
+        library_t *lib = library_get(grid_tab - 1);
+        if (lib) {
+            /* An empty library tab (nothing under the pinned folder, or not yet rescanned
+               after its contents changed) -- no Favorites-specific greeting here. */
+            ui_components_main_text_draw(STL_DEFAULT, ALIGN_CENTER, VALIGN_CENTER,
+                                     "\"%s\" has no ROMs.\n"
+                                     "\n"
+                                     "Z: File Browser",
+                                     lib->name);
+        } else {
+            /* The placeholder tab (no libraries pinned yet). */
+            ui_components_main_text_draw(STL_DEFAULT, ALIGN_CENTER, VALIGN_CENTER,
+                                     "Pinned folders appear here as tabs.\n"
+                                     "\n"
+                                     "To pin one: press Z, choose \"File Browser\",\n"
+                                     "browse to a folder, press Z for its menu,\n"
+                                     "and choose \"Pin as Library\".\n"
+                                     "\n"
+                                     "Z: File Browser");
+        }
+    } else if (fav_count == 0) {
         /* The greeting signoff flows through the rainbow like the inspect-border glow:
            recolour the spare style slots (STL_RAINBOW_BASE..+6 = ^07..^0D) every
            frame, spread across the hue wheel and rotated by an animated offset. */
@@ -3383,10 +3771,10 @@ static void draw(menu_t *menu, surface_t *d) {
                                      "\n"
                                      "Your favorites grid is empty.\n"
                                      "\n"
-                                     "Press R for the File Browser, then\n"
+                                     "Press Z for the File Browser, then\n"
                                      "hold B on a game to add it here.\n"
                                      "\n"
-                                     "Or highlight a folder and press R to\n"
+                                     "Or highlight a folder and press Z to\n"
                                      "favorite every game inside it at once.\n"
                                      "\n"
                                      "\n"
@@ -3480,15 +3868,15 @@ static void draw(menu_t *menu, surface_t *d) {
     } else if (move_mode) {
         ui_components_actions_bar_buttons_draw("A: Done", "B: Done", "S: Done", NULL, "R: Unfav (hold)");
     } else if (fav_count == 0) {
-        /* Empty grid: R either imports the /Favorites folder (if one was found) or opens
+        /* Empty grid: Z either imports the /Favorites folder (if one was found) or opens
            the file browser (see process()). */
         if (gs_can_scan) {
             ui_components_actions_bar_buttons_draw(NULL, NULL, "S: Launch", NULL, NULL);
         } else {
-            ui_components_actions_bar_buttons_draw(NULL, NULL, NULL, NULL, "R: File Browser");
+            ui_components_actions_bar_buttons_draw(NULL, NULL, NULL, NULL, "Z: File Browser");
         }
     } else {
-        /* Standardized fixed slots: A inspect, B move, S launch, C page, R menu. In A-Z
+        /* Standardized fixed slots: A inspect, B move, S launch, C page, Z menu. In A-Z
            mode C does letter jumps ("C: A-Z") and manual Move is disabled (B hidden). */
         bool az = menu->settings.always_sort_az;
         ui_components_actions_bar_buttons_draw(
@@ -3496,7 +3884,7 @@ static void draw(menu_t *menu, surface_t *d) {
             az ? NULL : "B: Move (hold)",
             "S: Launch",
             az ? "C: A-Z" : "C: Page",
-            "R: Menu");
+            "Z: Menu");
     }
 
     /* Splash overlay: shown until the first full page (all visible rows) of boxart
@@ -3669,7 +4057,7 @@ static void gs_finish(menu_t *menu) {
     for (int j = 0; j < gs_total; j++) path_free(gs_roms[j]);
     free(gs_roms); gs_roms = NULL;
     bookkeeping_save(&menu->bookkeeping);
-    refresh_favorites(menu);
+    refresh_grid(menu);
     compute_flow();
     gs_total = gs_done = 0;
     gs_pending = gs_working = gs_scanned = false;
@@ -3701,6 +4089,10 @@ static void gs_popup_draw(void) {
 
 /* ------------------------------------------------------------------ */
 void view_games_grid_init(menu_t *menu) {
+    /* Set before anything below reads it (e.g. the cache signature). Restores whichever
+       gallery tab (Favorites or a library) was active before we left the grid. */
+    grid_repoint_items(menu);
+
     /* Returning from the Z "Info" page reopens the popup we left from;
        any other entry (cold boot, tab switch) starts on the bare grid. */
     bool is_reopen       = reopen_inspect;
@@ -3733,6 +4125,7 @@ void view_games_grid_init(menu_t *menu) {
     move_r_held          = 0;
     grid_sq              = menu->settings.grid_square_tiles;
     grid_large           = menu->settings.grid_large_tiles;
+    grid_caption_favs    = menu->settings.grid_show_captions_favorites;
     gv_is_box            = is_box_view(menu->settings.image_view_grid);
     inspect_fav_i_cached = -1;
     if (inspect_logo) { sprite_free(inspect_logo); inspect_logo = NULL; }
@@ -3740,9 +4133,9 @@ void view_games_grid_init(menu_t *menu) {
     splash_active        = menu->settings.splash_enabled && !is_reopen && !splash_shown;
 
     /* Importing /Favorites used to run here on EVERY boot -- an O(files x list) scan that
-       was the ~33 s grid-side boot cost. It's now opt-in from the empty greeting (press R
+       was the ~33 s grid-side boot cost. It's now opt-in from the empty greeting (press S/Z
        to scan, with a progress bar). Detection of an importable folder happens below,
-       after refresh_favorites, only when the grid is empty. */
+       after refresh_grid, only when the grid is empty. */
 
     /* Only wipe the whole boxart cache when the favorites set or the grid image
        view actually changed (signature). Otherwise keep it — re-entering the grid
@@ -3750,8 +4143,8 @@ void view_games_grid_init(menu_t *menu) {
        cover. The one game edited in Game settings is invalidated explicitly below. */
     static uint32_t last_grid_sig = 0;
     uint32_t sig = 2166136261u;  /* FNV-1a over fav paths + relevant settings */
-    for (int k = 0; k < FAVORITES_COUNT; k++) {
-        bookkeeping_item_t *f = &menu->bookkeeping.favorite_items[k];
+    for (int k = 0; k < grid_items_cap; k++) {
+        bookkeeping_item_t *f = &grid_items[k];
         sig ^= (uint32_t)f->bookkeeping_type; sig *= 16777619u;
         if (f->bookkeeping_type == BOOKKEEPING_TYPE_ROM && f->primary_path) {
             for (const char *s = path_get(f->primary_path); *s; s++) { sig ^= (uint8_t)*s; sig *= 16777619u; }
@@ -3774,15 +4167,15 @@ void view_games_grid_init(menu_t *menu) {
         gm_invalidate_one_art(menu->load.load_favorite_id, false);
     }
 
-    refresh_favorites(menu);
+    refresh_grid(menu);
 
-    /* Greeting opt-in import: when the grid is empty, offer "R: Scan SD:/Favorites/"
-       instead of "R: File Browser" if an importable folder exists. This is a single dir
+    /* Greeting opt-in import: when the grid is empty, offer "S: Scan SD:/Favorites/"
+       instead of "Z: File Browser" if an importable folder exists. This is a single dir
        probe (dir_findfirst == 0 means the folder exists and has at least one entry) --
-       the actual enumeration only runs when the user presses R, so boot stays instant. */
+       the actual enumeration only runs when the user presses S/Z, so boot stays instant. */
     gs_pending = gs_working = gs_scanned = false;
     gs_can_scan = false;
-    if (fav_count == 0 && !is_reopen) {
+    if (grid_tab == 0 && fav_count == 0 && !is_reopen) {
         for (int di = 0; auto_fav_folder_names[di] && !gs_can_scan; di++) {
             path_t *d = path_init(menu->storage_prefix, "");
             path_push(d, (char *)auto_fav_folder_names[di]);
@@ -3802,13 +4195,13 @@ void view_games_grid_init(menu_t *menu) {
        the few-seconds-every-boot cost) and just rebuild the A-Z letter cache from the saved
        initials. This is also what removes the boot black-gap: no blocking sort before the
        first frame on a normal launch. */
-    if (menu->settings.always_sort_az && fav_count > 1) {
+    if (grid_tab == 0 && menu->settings.always_sort_az && fav_count > 1) {
         if (fav_needs_resort(menu)) {
             gm_run_sort_az(menu);
             gm_reset_all_caches(menu);
         } else {
             for (int gi = 0; gi < fav_count; gi++)
-                az_letter[fav_indices[gi]] = menu->bookkeeping.favorite_items[fav_indices[gi]].sort_initial;
+                az_letter[fav_indices[gi]] = grid_items[fav_indices[gi]].sort_initial;
             az_letter_ready = true;
             az_letter_count = fav_count;
         }
@@ -3821,11 +4214,11 @@ void view_games_grid_init(menu_t *menu) {
         if (grid_more_target) path_free(grid_more_target);
         grid_more_target = gm_reopen_path; gm_reopen_path = NULL;
         if (grid_more_target) {
-            int fi = gm_target_fav_index(menu);
-            grid_more_is_fav = (fi >= 0);
+            grid_more_is_fav = (gm_target_fav_index(menu) >= 0);
             /* Point the grid cursor at this game so it sits behind the menu. */
+            int gti = gm_target_grid_index(menu);
             for (int gi = 0; gi < fav_count; gi++) {
-                if (fav_indices[gi] == fi) { sel_fav = gi; break; }
+                if (fav_indices[gi] == gti) { sel_fav = gi; break; }
             }
             ensure_visible();
             strncpy(gm_fav_lbl, grid_more_is_fav ? "Unfavorite" : "Favorite", sizeof(gm_fav_lbl) - 1);

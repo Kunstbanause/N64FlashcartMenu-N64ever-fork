@@ -9,7 +9,9 @@
 
 #include "../cart_load.h"
 #include "../fonts.h"
+#include "../fs_filter.h"
 #include "../ini_parser.h"
+#include "../library.h"
 #include "../rom_info.h"
 #include "../ui_components/constants.h"
 #include "utils/fs.h"
@@ -19,94 +21,23 @@
 
 static const char *archive_extensions[] = { "zip", NULL };
 static const char *cheat_extensions[] = {"cht", "cheats", "datel", "gameshark", NULL};
-static const char *disk_extensions[] = { "ndd", NULL };
 static const char *emulator_extensions[] = { "nes", "sfc", "smc", "gb", "gbc", "sms", "gg", "sg", "chf", NULL };
 static const char *image_extensions[] = { "png", NULL };
 static const char *music_extensions[] = { "mp3", NULL };
-static const char *n64_rom_extensions[] = { "z64", "n64", "v64", "rom", NULL };
 static const char *patch_extensions[] = { "bps", "ips", "aps", "ups", "xdelta", NULL };
 static const char *save_extensions[] = { "sav", "eep", "sra", "srm", "fla", NULL };
 static const char *text_extensions[] = { "txt", "ini", "yml", "yaml", NULL };
 static const char *rom_meta_extensions[] = { "meta", "metadata", NULL };
 
-static const char *hidden_root_paths[] = {
-    "/menu.bin",
-    "/menu",
-    "/N64FlashcartMenu.n64",
-    "/ED64",
-    "/ED64P",
-    "/sc64menu.n64",
-    // Windows garbage
-    "/System Volume Information",
-    // macOS garbage
-    "/.fseventsd",
-    "/.Spotlight-V100",
-    "/.Trashes",
-    "/.VolumeIcon.icns",
-    "/.metadata_never_index",
-    NULL,
-};
-
-struct substr { const char *str; size_t len; };
-#define substr(str) ((struct substr){ str, sizeof(str) - 1 })
-
-static const struct substr hidden_basenames[] = {
-    substr("desktop.ini"), // Windows Explorer settings
-    substr("Thumbs.db"),   // Windows Explorer thumbnails
-    substr(".DS_Store"),   // macOS Finder settings
-};
-#define HIDDEN_BASENAMES_COUNT (sizeof(hidden_basenames) / sizeof(hidden_basenames[0]))
-
-static const struct substr hidden_prefixes[] = {
-    substr("._"), // macOS "AppleDouble" metadata files
-};
-#define HIDDEN_PREFIXES_COUNT (sizeof(hidden_prefixes) / sizeof(hidden_prefixes[0]))
-
 // static bool file_is_fat_hidden (const char *full_path) {
 //     struct stat st;
-    
+
 //     if (stat(full_path, &st) == 0) {
 //         return FAT_ATTR_IS_HID(&st);
 //     }
-    
+
 //     return false;
 // }
-
-static bool path_is_hidden (path_t *path) {
-    char *stripped_path = strip_fs_prefix(path_get(path));
-
-    // Check for hidden files based on full path
-    for (size_t i = 0; hidden_root_paths[i] != NULL; i++) {
-        if (strcmp(stripped_path, hidden_root_paths[i]) == 0) {
-            return true;
-        }
-    }
-
-    char *basename = file_basename(stripped_path);
-    size_t basename_len = strlen(basename);
-
-    // Check for hidden files based on filename
-    for (size_t i = 0; i < HIDDEN_BASENAMES_COUNT; i++) {
-        if (basename_len == hidden_basenames[i].len &&
-            strncmp(basename, hidden_basenames[i].str, hidden_basenames[i].len) == 0) {
-            return true;
-        }
-    }
-    
-    // Check for hidden files based on filename prefix
-    for (size_t i = 0; i < HIDDEN_PREFIXES_COUNT; i++) {
-        if (basename_len > hidden_prefixes[i].len &&
-            strncmp(basename, hidden_prefixes[i].str, hidden_prefixes[i].len) == 0) {
-            return true;
-        }
-    }
-
-    // if (file_is_fat_hidden(path_get(path))) {
-    //     return true;
-    // }
-
-    return false;
-}
 
 static int compare_entry (const void *pa, const void *pb) {
     entry_t *a = (entry_t *) (pa);
@@ -623,6 +554,45 @@ static void toggle_favorite(menu_t *menu, void *arg) {
     fav_unsaved = true;   /* flushed once on browser exit (no per-toggle full-ini rewrite) */
 }
 
+/* ---- Pin/unpin a folder as a library tab ----
+   Same folder-resolution convention as Fav/Unfav inside folder: a highlighted subfolder is
+   the target; otherwise (browsing inside one, or a non-folder entry highlighted) the CURRENT
+   directory is. */
+static path_t *pin_target_folder(menu_t *menu) {
+    if (menu->browser.entry && menu->browser.entry->type == ENTRY_TYPE_DIR) {
+        return path_clone_push(menu->browser.directory, menu->browser.entry->name);
+    }
+    return path_clone(menu->browser.directory);
+}
+
+static char pin_toggle_label[40] = "Pin as Library";
+
+static void update_pin_label(menu_t *menu) {
+    path_t *p = pin_target_folder(menu);
+    bool pinned = library_find_by_path(p) >= 0;
+    path_free(p);
+    strncpy(pin_toggle_label, pinned ? "Unpin Library" : "Pin as Library", sizeof(pin_toggle_label) - 1);
+    pin_toggle_label[sizeof(pin_toggle_label) - 1] = '\0';
+}
+
+static void toggle_pin_folder(menu_t *menu, void *arg) {
+    (void)arg;
+    path_t *p = pin_target_folder(menu);
+    int idx = library_find_by_path(p);
+    if (idx >= 0) {
+        library_remove(idx);
+        sound_play_effect(SFX_EXIT);
+        path_free(p);
+    } else if (library_add(NULL, p)) {
+        sound_play_effect(SFX_SETTING);
+        path_free(p);
+    } else {
+        path_free(p);
+        menu_show_error(menu, "Can't pin: already at the library limit,\nor this folder is already pinned.");
+    }
+    update_pin_label(menu);
+}
+
 static void show_properties (menu_t *menu, void *arg) {
     if (!menu->browser.entry) return;   /* empty folder: no entry to inspect */
     reopen_pending = true;
@@ -824,7 +794,7 @@ static void kb_process (menu_t *menu) {
         if (kb_len > 0) { kb_text[--kb_len] = '\0'; sound_play_effect(SFX_CURSOR); }
     } else if (menu->actions.settings) {                /* START: OK */
         kb_commit(menu);
-    } else if (menu->actions.options) {                 /* R: cancel */
+    } else if (menu->actions.options) {                 /* Z: cancel */
         kb_mode = 0; sound_play_effect(SFX_EXIT);
     }
 }
@@ -1072,6 +1042,7 @@ static void update_dynamic_labels(menu_t *menu) {
     snprintf(fm_rb_countdown_label, sizeof(fm_rb_countdown_label), "ROM boot countdown: %ds",
              menu->settings.rom_boot_countdown_sec);
     update_fav_label(menu);
+    update_pin_label(menu);
     rebuild_history_popup(menu);
 }
 
@@ -1643,6 +1614,7 @@ static component_context_menu_t more_context_menu = {
     .list = {
         { .text = "Fav inside folder",    .action = fav_inside_folder },
         { .text = "Unfav inside folder",  .action = unfav_inside_folder },
+        { .text = pin_toggle_label,       .action = toggle_pin_folder },
         { .text = "" },                   /* separator row */
         { .text = "Extra",                .submenu = &extra_norom_context_menu },
         { .text = "" },                   /* separator row */
@@ -1862,25 +1834,25 @@ static void draw_file_popup(menu_t *menu) {
     }
 
     /* Toolbar at the bottom action bar, spread across the full width like the grid.
-       Right side mirrors the grid's "C: <fn>     R: Menu" convention (C fast-scrolls
+       Right side mirrors the grid's "C: <fn>     Z: Menu" convention (C fast-scrolls
        the list / long names here). "Fav (hold)" only applies to ROMs; else "Up". */
     entry_type_t et = menu->browser.entry ? menu->browser.entry->type : ENTRY_TYPE_OTHER;
     if (link_pick_active) {
-        /* Link-pick: A links the complementary-type file (or opens folders), B goes up, R cancels. */
+        /* Link-pick: A links the complementary-type file (or opens folders), B goes up, Z cancels. */
         const char *a;
         if (et == ENTRY_TYPE_DIR || et == ENTRY_TYPE_ARCHIVE) a = "A: Open";
         else if (link_pick_src_is_disc ? (et == ENTRY_TYPE_ROM) : (et == ENTRY_TYPE_DISK)) a = "A: Link";
         else a = "";
-        ui_components_actions_bar_buttons_draw(a, "B: Up", "", "C: Scroll", "R: Cancel");
+        ui_components_actions_bar_buttons_draw(a, "B: Up", "", "C: Scroll", "Z: Cancel");
         return;
     }
     bool over_rom = (et == ENTRY_TYPE_ROM);
     /* A boots ROMs/disks/emulators ("Launch") but only opens folders and other files. */
     bool launches = over_rom || et == ENTRY_TYPE_DISK || et == ENTRY_TYPE_EMULATOR;
     if (over_rom) {
-        ui_components_actions_bar_buttons_draw("A: Launch", "B: Fav (hold)", "S: Grid", "C: Scroll", "R: Menu");
+        ui_components_actions_bar_buttons_draw("A: Launch", "B: Fav (hold)", "S: Grid", "C: Scroll", "Z: Menu");
     } else {
-        ui_components_actions_bar_buttons_draw(launches ? "A: Launch" : "A: Open", "B: Up", "S: Grid", "C: Scroll", "R: Menu");
+        ui_components_actions_bar_buttons_draw(launches ? "A: Launch" : "A: Open", "B: Up", "S: Grid", "C: Scroll", "Z: Menu");
     }
 }
 
@@ -1976,7 +1948,7 @@ static void process (menu_t *menu) {
                 return;
             }
 
-            /* R: open the More menu. Works even in an EMPTY folder (no entry) -- pcm falls back to
+            /* Z: open the More menu. Works even in an EMPTY folder (no entry) -- pcm falls back to
                more_context_menu (Extra / History / File management), so Paste, Set-default-dir,
                etc. are reachable to drop a copied/moved file into an empty directory. */
             if (menu->actions.options) {
@@ -2268,11 +2240,11 @@ static void process (menu_t *menu) {
         }
     } else if (menu->actions.options) {
         if (link_pick_active) {
-            /* R cancels an in-progress link instead of leaving to the grid. */
+            /* Z cancels an in-progress link instead of leaving to the grid. */
             cancel_link_pick();
             sound_play_effect(SFX_EXIT);
         } else {
-            /* R: back to the Favorites grid (tabs are gone; R toggles Files <-> Grid) */
+            /* Z: back to the grid, on whichever tab it was opened from. */
             menu->next_mode = MENU_MODE_GAMES_GRID;
             sound_play_effect(SFX_CURSOR);
         }
@@ -2373,7 +2345,7 @@ static void draw (menu_t *menu, surface_t *d) {
     if (kb_mode) {
         view_games_grid_draw_background(menu, d);
         kb_popup_draw();
-        ui_components_actions_bar_buttons_draw("A: Select", "B: Delete", "S: OK", "", "R: Cancel");
+        ui_components_actions_bar_buttons_draw("A: Select", "B: Delete", "S: OK", "", "Z: Cancel");
         rdpq_detach_show();
         return;
     }
@@ -2468,7 +2440,7 @@ static void draw (menu_t *menu, surface_t *d) {
         menu_font_style_t top_style;
         if (link_pick_active) {
             snprintf(display_path, sizeof(display_path),
-                     "LINK  %s  ->  open its %s   (A: link & boot,  R: cancel)",
+                     "LINK  %s  ->  open its %s   (A: link & boot,  Z: cancel)",
                      link_pick_name, link_pick_src_is_disc ? "base ROM" : "disc");
             top_style = STL_YELLOW;
         } else {
@@ -2492,7 +2464,7 @@ static void draw (menu_t *menu, surface_t *d) {
         );
     }
 
-    /* Action bar: 4 equal sections — A | S: action | R: Grid | C▲▼ */
+    /* Action bar: 4 equal sections — A | S: action | Z: Grid | C▲▼ */
     {
         int ab_x = VISIBLE_AREA_X0 + TEXT_MARGIN_HORIZONTAL;
         int ab_y = LAYOUT_ACTIONS_SEPARATOR_Y + BORDER_THICKNESS + TEXT_MARGIN_VERTICAL + TEXT_OFFSET_VERTICAL;
@@ -2513,7 +2485,7 @@ static void draw (menu_t *menu, surface_t *d) {
         rdpq_text_print(&p, FNT_DEFAULT, ab_x + sec,     ab_y,
             link_pick_active ? "" : (can_favorite ? "S: Launch" : "S: More"));
         rdpq_text_print(&p, FNT_DEFAULT, ab_x + 2 * sec, ab_y,
-            link_pick_active ? "R: Cancel" : "R: Grid");
+            link_pick_active ? "Z: Cancel" : "Z: Grid");
         p.align = ALIGN_RIGHT;
         rdpq_text_print(&p, FNT_DEFAULT, ab_x + 3 * sec, ab_y, "C \xE2\x96\xB2\xE2\x96\xBC");
     }

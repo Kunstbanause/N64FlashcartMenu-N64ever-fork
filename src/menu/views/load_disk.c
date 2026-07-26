@@ -219,8 +219,8 @@ static void draw (menu_t *menu, surface_t *d) {
             "A: Load",
             "B: Back",
             NULL,
-            menu->load.rom_path ? "L/Z: +ROM" : NULL,
-            "R: Options");
+            menu->load.rom_path ? "L: +ROM" : NULL,
+            "Z: Options");
 
         if (boxart && boxart->image && !boxart->loading) {
             ui_components_boxart_draw(boxart);
@@ -438,6 +438,19 @@ void view_load_disk_init (menu_t *menu) {
             menu->load.combined_disk_rom = true;
         } else if (menu->load.rom_path) {
             /* Standalone disk favorite: clear any stale ROM from a prior combined launch. */
+            rom_info_free_meta(&menu->load.rom_info);
+            path_free(menu->load.rom_path);
+            menu->load.rom_path = NULL;
+        }
+    } else if (menu->load.library_disk_path) {
+        /* Library-tab disk launch (games_grid.c's launch_favorite): not backed by
+           history/favorites -- a library item has no bookkeeping index -- so the path was
+           handed over directly. A library item is never linked (no secondary_path, no
+           cached game code to check disclink against pre-load) -- boot it standalone; the
+           actual game code, read from the disk itself below, still drives everything after. */
+        menu->load.disk_slots.primary.disk_path = menu->load.library_disk_path;
+        menu->load.library_disk_path = NULL;
+        if (menu->load.rom_path) {
             rom_info_free_meta(&menu->load.rom_info);
             path_free(menu->load.rom_path);
             menu->load.rom_path = NULL;

@@ -16,6 +16,7 @@
 #include "flashcart/flashcart.h"
 #include "fonts.h"
 #include "hdmi.h"
+#include "library.h"
 #include "menu_state.h"
 #include "menu.h"
 #include "mp3_player.h"
@@ -32,6 +33,7 @@
 #define MENU_CUSTOM_FONT_FILE       "custom.font64"
 #define MENU_FAVORITES_FILE         "favorites.ini"
 #define MENU_HISTORY_FILE           "history.ini"
+#define MENU_LIBRARIES_FILE         "libraries.ini"
 
 #define MENU_CACHE_DIRECTORY        "cache"
 #define BACKGROUND_CACHE_FILE       "background.data"
@@ -245,6 +247,20 @@ static void menu_init (boot_params_t *boot_params) {
     free(legacy_bk_path);
     free(favorites_bk_path);
     free(history_bk_path);
+
+    /* Independent path_t, NOT the shared `path` above -- by this point `path` already has two
+       unpaired pushes on it (MENU_CACHE_DIRECTORY / BACKGROUND_CACHE_FILE, above) that are never
+       popped because nothing else used to read `path` again before it's freed. Pushing onto that
+       already-fouled path silently built the wrong libraries.ini location. */
+    {
+        path_t *lib_path = path_init(menu->storage_prefix, MENU_DIRECTORY);
+        path_push(lib_path, MENU_N64EVER_DIRECTORY);
+        path_push(lib_path, MENU_LIBRARIES_FILE);
+        library_init(path_get(lib_path));
+        library_load();
+        path_free(lib_path);
+    }
+
     bt_book = get_ticks_ms();
 
     debugf("[BOOT] menu_init phases (ms): flashcart=%llu coreinit=%llu display=%llu "
@@ -288,6 +304,8 @@ static void menu_init (boot_params_t *boot_params) {
  * @param menu Pointer to the menu structure.
  */
 static void menu_deinit (menu_t *menu) {
+    library_deinit();
+
     ui_components_background_free();
     rspq_wait();  // Execute deferred callbacks (e.g., display list freeing) before closing RSPQ
 
@@ -295,6 +313,8 @@ static void menu_deinit (menu_t *menu) {
 
     path_free(menu->load.disk_slots.primary.disk_path);
     path_free(menu->load.rom_path);
+    path_free(menu->load.library_disk_path);
+    path_free(menu->load.library_rom_path);
     for (int i = 0; i < menu->browser.entries; i++) {
         free(menu->browser.list[i].name);
     }

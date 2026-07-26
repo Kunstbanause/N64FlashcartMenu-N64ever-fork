@@ -119,6 +119,8 @@ typedef struct {
         bool options;
         bool settings;
         bool lz_context;
+        bool tab_next;
+        bool tab_prev;
     } actions;
 
     /* menu_init boot timing (ms): [0]flashcart [1]coreinit [2]display [3]fonts
@@ -151,6 +153,15 @@ typedef struct {
         bool combined_disk_rom;
         menu_mode_t load_return_mode; /**< When non-zero, leave_view() uses this instead of deriving a destination */
         bool from_grid;              /**< Opened from the grid — draw grid background, not full-screen black */
+        /** Set by a library-tab disk launch, which isn't backed by history/favorites (a library
+         *  item has no bookkeeping index) -- consumed once by view_load_disk_init and cleared. */
+        path_t *library_disk_path;
+        /** Same idea for a library-tab ROM launch -- consumed once by view_load_rom_init and
+         *  cleared. Checked BEFORE menu->browser.entry there: browser.entry is never reset to
+         *  NULL on leaving the browser, so relying on an implicit "else" after that check silently
+         *  overwrites this with a stale browser path (pinning a folder requires having visited the
+         *  browser at least once, so entry is essentially always non-NULL by launch time). */
+        path_t *library_rom_path;
     } load;
 
     struct {

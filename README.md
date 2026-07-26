@@ -66,7 +66,10 @@ See **[§2 Build system](#2-build-system)** for the full story.
 ## 1. Highlights
 
 - **Favorites Grid** is the home screen — a masonry layout of cover art, not a file list.
-- **Universal "More" menu** (R) — one menu for everything: launch, favorite, per-game art,
+- **Pinned library tabs** — pin any folder from Files to give it its own grid tab (`L`/`R` to
+  switch); read-only galleries with automatic filename captions so duplicate-art ROM hacks stay
+  distinguishable. See §3.
+- **Universal "More" menu** (Z) — one menu for everything: launch, favorite, per-game art,
   grid settings, hardware, history, settings, file browser.
 - **Inspect popup** (A) — cover + a 2+2 metadata block (name/developer over date/region) and a
   scrollable description sized to fit without scrolling for most games; sits on top of the grid.
@@ -403,14 +406,15 @@ solid black background — see §6).
 | C ◀▶ | Jump A-Z letter groups (when sorted, wraps Z↔A) / first–last tile of the row (unsorted) |
 | A | **Inspect** the selected game |
 | S (Start) | **Launch** immediately |
-| B (hold) | Enter **Move mode** (reorder; hold R to unfavorite; D-pad to move) |
-| R | Open the **universal Menu** |
+| B (hold) | Enter **Move mode** (reorder; hold R to unfavorite; D-pad to move) — **Favorites only** |
+| Z | Open the **universal Menu** |
+| L / R | Switch grid tabs: **Favorites** ↔ pinned **libraries** (or a placeholder tab explaining how to pin one) — see "Pinned library tabs" below |
 
 Empty grid shows a hint: hold-B on a ROM in the File Browser, or select a folder → menu →
 "Fav inside folder".
 
 ### Inspect popup
-`A: Launch · B: Back · R: Menu · C ▲▼` (scroll). A compact **4:3 window over the grid** (no black
+`A: Launch · B: Back · Z: Menu · C ▲▼` (scroll). A compact **4:3 window over the grid** (no black
 fill): cover at left, a vertical divider, then below a horizontal divider a **2+2 metadata block**
 — **name + developer** (may be long) over **date + region** (short), each vertically centred — and
 the description (centred when it fits, top-aligned + scrollable when it doesn't). **Demo / Prototype
@@ -418,45 +422,67 @@ the description (centred when it fits, top-aligned + scrollable when it doesn't)
 Aleck64 / iQue variants are flagged in the region slot. You can add your own entries, description
 and image per game via `gameconfigs/` (see §5).
 
-### Universal "More" menu (R from grid; R from inspect)
+### Universal "More" menu (Z from grid; Z from inspect)
 Order:
-1. Launch · Unfavorite · Game settings · Game Metadata
+1. Launch · Unfavorite (or **Add to Favorites** on a library tab) · Rescan library (library tabs only) · Game settings · Game Metadata
 2. Presents As · Grid settings · `Favorites: X/2048`
 3. Menu Settings · Menu Information · Hardware
 4. History · File Browser
 
 - **Favorite/Unfavorite** is *deferred*: it flips the label and keeps the game on the grid;
-  the change commits when you close the menu (so accidental unfavorites can be undone).
+  the change commits when you close the menu (so accidental unfavorites can be undone). On a
+  **library tab** this row is a one-way **Add to Favorites** instead — a library is a read-only
+  gallery, not the favorites list, so there's nothing to unfavorite from here.
+- **Rescan library**: re-scans the pinned folder from scratch (escape hatch for the
+  scan-once-per-boot cache — e.g. after adding/removing ROMs on the card). Only shown on a
+  library tab.
 - **Presents As** (per-game): Region art (Auto / NTSC / PAL / NTSC-J) + per-context image view
   (Grid / Inspect / Load) + Reset to defaults. Only the *Grid* view (and region) reload the
   tile; Inspect/Load don't flash the grid.
-- **Grid settings** (global): Grid/Inspect/Load image view, Set tiles square. Grid-view changes
-  reload covers live.
+- **Grid settings** (global): Grid/Inspect/Load image view, Set tiles square, **Favorites
+  captions** (On/Off — library tabs always show filename captions regardless of this; see
+  "Pinned library tabs" below). Sort A-Z / Clear all favorites / Always sort A-Z are
+  **Favorites-only** and hidden on a library tab. Grid-view changes reload covers live.
 - **Game Metadata**: see §7.
 - Sub-views reopen this menu (at the row/submenu you left from) when they close.
 
-### File Browser popup (Menu → File Browser, or R on an empty grid)
+### Pinned library tabs
+Pin a folder from Files (highlight it → **Z** → *Pin as Library*) to give it its own tab on the
+grid, alongside Favorites. `L`/`R` on the grid switches tabs; with nothing pinned, the second tab
+is a placeholder explaining how to pin one, so there are always ≥2 tabs to switch between. The
+**File Browser is not a tab** — reach it from any tab via **Z → File Browser**.
+
+A library's contents are scanned once per boot, the first time you switch to its tab (recursive,
+flattened, same ROM/disk filtering as "Fav inside folder"); pinned folders (name + path) persist
+to `menu/n64ever/libraries.ini` across boots. A library tab is a **read-only gallery**: move mode,
+Sort A-Z, Clear all, and Always-sort-A-Z are Favorites-only and hidden there; the fav-toggle row
+becomes **Add to Favorites**. Tiles always show a **filename caption** under the art on a library
+tab (Favorites-tab captions are opt-in — Grid settings → *Favorites captions*), so ROM hacks that
+share their base game's box art stay distinguishable. Full user docs: [Pinned
+Libraries](docs/23_pinned_libraries.md).
+
+### File Browser popup (Menu → File Browser, or Z on an empty grid)
 2/3-screen popup, path + `X/128 *` counter in the header.
 | Button | Action |
 |---|---|
 | A | Launch ROM / enter folder / open file |
 | S | Back to Grid |
-| R | Open the More menu for the entry |
+| Z | Open the More menu for the entry |
 | B | Up a directory (double-tap at root → back to the Menu); **hold on a ROM = favorite** |
 | B-hold + C/D-pad sweep | Mark a range of favorites (visual first, committed on release) |
 | C ◀▶ | Horizontally scroll a long selected name |
 
 Favorited ROMs show a trailing `*`. On a **folder**, the More menu offers **Fav inside folder /
-Unfav inside folder** — a progress popup shows during the pass and **B cancels it (full undo —
-nothing is committed)**. The More menu (R) opens **even in an empty folder**, so File management
-(below) is always reachable.
+Unfav inside folder** (progress popup during the pass, **B cancels it** — full undo, nothing is
+committed) and **Pin as Library / Unpin Library** (see "Pinned library tabs" above). The More menu
+(**Z**) opens **even in an empty folder**, so File management (below) is always reachable.
 
 **File management** (More → File management) operates on the selected entry / current directory:
 - **Copy / Move** — capture the entry, then **Paste** into any other folder. Move is instant
   (same-volume `f_rename`); Copy shows a **rainbow progress bar** and **B cancels** it (the source
   is never touched). Won't overwrite an existing name.
 - **Rename / Create folder** — open the **on-screen keyboard** (D-pad/stick to move, **A** type,
-  **B** backspace, Shift toggles case, Space; **START** = OK, **R** = cancel). Rename uses
+  **B** backspace, Shift toggles case, Space; **START** = OK, **Z** = cancel). Rename uses
   `f_rename`; Create folder uses `f_mkdir`.
 - **Delete**, **Show properties**, **Set current directory as default**.
 - **Show / Hide file size** — a **global** on/off (persisted). When on, every file's size shows
@@ -465,7 +491,7 @@ nothing is committed)**. The More menu (R) opens **even in an empty folder**, so
 
 Launching an **unlinked 64DD expansion disc** (E-prefix code, needs a base cartridge) **offers to
 link it** — now **in the rainbow popup itself** (not a separate full-screen list): a `LINK … → pick
-its base ROM` banner, **A** links + boots, **B** goes up a directory, **R** cancels. See §5 (disclink).
+its base ROM` banner, **A** links + boots, **B** goes up a directory, **Z** cancels. See §5 (disclink).
 
 ### ROM boot (power-on convenience)
 **File management → Set ROM boot** marks the selected ROM and enables ROM boot. On the next
@@ -530,6 +556,7 @@ All under the flashcart's storage prefix (e.g. `sd:/`). `MENU_DIRECTORY = /menu`
 | `menu/config.ini` | R/W | Settings | INI, `[menu]` / `[autoload]` / `[menu_beta_flag]` |
 | `menu/n64ever/favorites.ini` | R/W | Favorites list | INI `[favorite]`, `N_primary_path` / `N_type` keys |
 | `menu/n64ever/history.ini` | R/W | Recently-played list | INI `[history]`, `N_primary_path` / `N_type` keys |
+| `menu/n64ever/libraries.ini` | R/W | Pinned library tabs (name + folder path only; contents re-scanned each boot) | INI `[libraries]`, `N_name` / `N_path` keys |
 | `menu/history.ini` | R | **Legacy** combined favorites+history (migrated on first boot) | INI `[favorite]` + `[history]` |
 | `menu/n64ever/splash.png` | R/W | Custom boot splash | PNG ≤ 640×480 (RGB8 → RGBA16) |
 | `menu/n64ever/audio/*.wav64` | R | Override grid SFX (`grid_move`, `grid_enter`, `grid_back`, `launch`) | wav64 |
@@ -540,7 +567,8 @@ All under the flashcart's storage prefix (e.g. `sd:/`). `MENU_DIRECTORY = /menu`
 | `menu/n64ever/gameconfigs/<stem>-{front,back,3dbox,cart,3dcart,logo}.png` | R | Per-game custom art override | PNG (≤1024²) |
 | `menu/metadata/<c>/<u>/<u>/<d>/metadata.ini` | R | SD metadata DB entry | INI `[meta]` |
 | `menu/metadata/<c>/<u>/<u>/<d>/boxart_front.png` (+ back/left/right/top/bottom, gamepak_front/back) | R | SD box art | PNG ≤ 158×158, RGB8 |
-| `menu/metadata/homebrew/<title>/…` | R | Homebrew art/meta (code `?ED?`), keyed by 20-char ROM title | as above |
+| `menu/metadata/homebrew/<title>/…` | R | Homebrew art (code `?ED?`), keyed by 20-char ROM title | as above |
+| `menu/metadata/homebrew/<rom-filename>/…` | R | Fallback art for any ROM with no matching Game-Code art dir (hacks, other homebrew), keyed by filename | as above |
 | `menu/boxart/CCCC.png` | R | **Legacy** flat boxart | PNG (deprecated) |
 | `<rom>.meta` / `<rom dir>/metadata.ini` / embedded ZIP `metadata.ini` | R | Per-ROM metadata | INI `[meta]` |
 | saves folder (when "use saves folder" on) | R/W | Game saves | `.sav/.eep/.sra/.srm/.fla` |
@@ -645,6 +673,12 @@ For each candidate type in the chain: **custom-folder PNG → baked ROM sprite �
   the same title under other region bytes (`E, P, J, U, A, X, …`). So a PAL ROM with no PAL art
   uses the US cover. Box front/back honor the per-game region (Presents As); cart/3D/logo are
   region-agnostic.
+- **SD metadata PNG fallback chain:** 4-char code dir → 3-char code dir (region dropped) →
+  legacy `menu/boxart/` → **`menu/metadata/homebrew/<rom-filename>/`** (no extension) if none of
+  those directories exist at all. That last rung gives every ROM with no matching Game-Code art
+  — homebrew, ROM hacks, prototypes — a stable, distinct art slot keyed by its own filename,
+  without needing "Use Custom Files" on. ROMs declaring the "Advanced Homebrew ROM Header" code
+  (`?ED?`) instead use `menu/metadata/homebrew/<20-char ROM title>/` (unchanged, higher priority).
 
 ### Special editions (shared-code ROMs) — filename-keyed override
 Some ROMs **reuse another game's 4-char NUS code**, so the code-keyed text DB and baked art
@@ -703,8 +737,9 @@ game blank".
 ## 9. Source map (where things live)
 
 - `src/menu/views/games_grid.c` — the Grid, Inspect, universal More menu, Game Metadata
-  register, History modal, splash, lazy art loading.
-- `src/menu/views/browser.c` — File Browser (full list + shrink-wrapped popup), folder-fav.
+  register, History modal, splash, lazy art loading, grid tabs (`grid_switch_tab`/`grid_repoint_items`).
+- `src/menu/library.c` — pinned libraries: `libraries.ini` persistence, recursive folder scan.
+- `src/menu/views/browser.c` — File Browser (full list + shrink-wrapped popup), folder-fav, pin/unpin.
 - `src/menu/views/load_rom.c` — "Game settings" + ROM loading screen.
 - `src/menu/views/{system_info,flashcart_info,rtc,cpakfs_manager,credits}.c` — hardware/info.
 - `src/menu/views/settings_editor.c` — settings popup.
@@ -721,6 +756,17 @@ game blank".
   gameconfigs `.ini` + `.meta` + an **embedded-ZIP scan**; and `fav_entry_cache` is a sizable
   per-game struct (description buffer etc.).
 
+**Pinned libraries**
+- Unpinning a library **other than the one you're currently viewing** can, in rare cases, leave
+  the active tab pointing at whichever pinned library shifted into that list position, instead of
+  falling back to Favorites (only the case of unpinning the *last* library, or the currently
+  active one, is guaranteed to fall back correctly). Reboot or switch tabs manually if a tab looks
+  wrong after unpinning.
+- A 64DD **expansion disc** (e.g. F-Zero X Expansion Kit) launched from a library tab won't
+  auto-offer the disclink cart-picker the way a Favorites expansion disc does — library items
+  don't cache a game code, so the auto-link check can't recognise it as an expansion disc before
+  loading. It still boots standalone; link it from Favorites instead if you need the combined boot.
+
 **Build**
 - See §2 build traps (stale ROM, stale DFS, non-determinism, `n64sym` skipped).
 
@@ -729,12 +775,21 @@ game blank".
 ## 11. Tips & tricks
 
 **Favorites**
-- **Favorite a whole folder:** in Files, select a folder → R → *Fav inside folder*. **Press B
+- **Favorite a whole folder:** in Files, select a folder → Z → *Fav inside folder*. **Press B
   during the pass to cancel** (nothing is committed). *Unfav inside folder* removes them.
 - **Hold B on a ROM** in Files to favorite it directly; B-hold + sweep marks a range.
 - **A-Z sort:** Favorites submenu → *Run Once: Sort A-Z* (or the *Always sort A-Z* setting). On a
   big library it reads each game once — **hold B to cancel** if it's taking too long.
 - **C ▲▼ on the grid** jumps between A-Z letter sections (when the list is sorted).
+
+**Pinned libraries**
+- **Pin a folder:** in Files, select a folder → Z → *Pin as Library*. It shows up as a tab on the
+  grid immediately — cycle with `L`/`R`. *Unpin Library* removes the tab (contents on the SD card
+  are untouched either way).
+- **Rescan** a library (Z on a library tab → *Rescan library*) after adding/removing ROMs on the
+  card without rebooting.
+- Turn on **Favorites captions** (Grid settings) if you'd like the same duplicate-art-disambiguating
+  filename captions on Favorites that library tabs always show.
 
 **Navigation**
 - **Double-tap B** at the Files root jumps straight back to the grid.

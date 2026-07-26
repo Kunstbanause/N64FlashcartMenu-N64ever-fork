@@ -475,7 +475,7 @@ static void process (menu_t *menu) {
                 return;
             } 
 
-            // Pressing L or Z : dump a single note
+            // Pressing L: dump a single note
             else if (menu->actions.lz_context && 
                 use_rtc && 
                 !show_complete_write_confirm_message &&
@@ -859,8 +859,8 @@ static void draw (menu_t *menu, surface_t *d) {
         );
         ui_components_actions_bar_text_draw(style,
             ALIGN_RIGHT, VALIGN_TOP,
-            "L|Z: Backup a Note\n"
-            "R: Options\n"
+            "L: Backup a Note\n"
+            "Z: Options\n"
         );
     } else {
         ui_components_actions_bar_text_draw(style,

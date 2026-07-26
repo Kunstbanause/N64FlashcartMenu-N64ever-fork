@@ -6,10 +6,18 @@ This is the **N64ever** release of N64FlashcartMenu — a fork of upstream **V0.
 reworks the front-end, bringing:
 
 - a **cover-art, Grid-based GUI** — a Favorites Grid as the home screen, not a file list
-- a breadth of **game-metadata support**
+- **pinned library tabs** — pin any folder from the File Browser to give it its own tab on the
+  grid (`L`/`R` to switch), alongside Favorites; read-only galleries with automatic filename
+  captions to tell apart ROM hacks that share their base game's box art
+- a breadth of **game-metadata support**, including a filename-keyed box-art fallback for
+  homebrew/ROM hacks with no matching Game-Code art directory
 - a **unified popup UI** — Inspect, a universal "More" menu, and full file management
   (Copy/Move/Rename/Create-folder via an on-screen keyboard), all over the grid
 - **64DD disc linking**, an idle **cover-art screensaver**, **ROM boot** countdown, new font and much more
+
+**Controls note:** the universal "More"/options menu is on `Z` everywhere (moved off `R` to make
+room for `L`/`R` grid-tab switching); `L` alone is the remaining `L`/`Z` context actions
+(combined-boot, save-changes, etc.).
 
 **Read more in the docs:** **[README.md](README.md)**. Build notes: **[BUILD.md](BUILD.md)**
 

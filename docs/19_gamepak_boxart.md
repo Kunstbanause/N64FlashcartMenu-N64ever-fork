@@ -36,6 +36,13 @@ i.e. for GoldenEye, this would be `sd:/menu/metadata/N/G/E/boxart_front.png`.
 ROMs that use the ["Advanced Homebrew ROM Header"](https://n64brew.dev/wiki/ROM_Header) Game ID (`xEDx`) are matched using the "Game Title" (not the Game Code):
 e.g. `sd:/menu/metadata/homebrew/{game title}/boxart_front.png`
 
+Any other ROM with no matching Game Code folder at all (homebrew without that header, ROM hacks,
+prototypes, etc.) falls back to the same `homebrew/` directory, keyed instead by the ROM's own
+**filename** (without its extension):
+e.g. for `Some Homebrew Game.z64`, this would be `sd:/menu/metadata/homebrew/Some Homebrew Game/boxart_front.png`.
+This gives every such ROM its own distinct art slot even when several of them share a generic or
+duplicated Game Code.
+
 **Warning**: Excluding the region ID may show a box art of the wrong region.
 
 #### Itterating through game art images

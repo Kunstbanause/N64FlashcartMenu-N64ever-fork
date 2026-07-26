@@ -661,16 +661,26 @@ static void deinit (void) {
 void view_load_rom_init (menu_t *menu) {
     load_menu_ptr = menu;
 
-    /* Resolve the ROM path from whichever source the caller set. History / favorite / browser
-       launches each replace any previous rom_path. A caller that pre-set rom_path with NONE of
-       those sources (the ROM-boot countdown) keeps its path unchanged -- the old code's
-       unconditional `browser.entry->name` deref would crash in that case. */
+    /* Resolve the ROM path from whichever source the caller set. History / favorite / library /
+       browser launches each replace any previous rom_path. A caller that pre-set rom_path with
+       NONE of those sources (the ROM-boot countdown) keeps its path unchanged -- the old code's
+       unconditional `browser.entry->name` deref would crash in that case.
+
+       library_rom_path MUST be checked before browser.entry: browser.entry is never reset to
+       NULL on leaving the browser view, and pinning a library folder requires having visited the
+       browser at least once, so browser.entry is essentially always non-NULL by the time a
+       library ROM is launched -- checking it first would silently clobber a correctly-set
+       library_rom_path with a stale, unrelated browser path. */
     if (menu->load.load_history_id != -1) {
         if (menu->load.rom_path) { rom_info_free_meta(&menu->load.rom_info); path_free(menu->load.rom_path); }
         menu->load.rom_path = path_clone(menu->bookkeeping.history_items[menu->load.load_history_id].primary_path);
     } else if (menu->load.load_favorite_id != -1) {
         if (menu->load.rom_path) { rom_info_free_meta(&menu->load.rom_info); path_free(menu->load.rom_path); }
         menu->load.rom_path = path_clone(menu->bookkeeping.favorite_items[menu->load.load_favorite_id].primary_path);
+    } else if (menu->load.library_rom_path) {
+        if (menu->load.rom_path) { rom_info_free_meta(&menu->load.rom_info); path_free(menu->load.rom_path); }
+        menu->load.rom_path = menu->load.library_rom_path;
+        menu->load.library_rom_path = NULL;
     } else if (menu->browser.entry) {
         if (menu->load.rom_path) { rom_info_free_meta(&menu->load.rom_info); path_free(menu->load.rom_path); }
         menu->load.rom_path = path_clone_push(menu->browser.directory, menu->browser.entry->name);
