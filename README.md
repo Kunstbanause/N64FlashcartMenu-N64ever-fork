@@ -17,6 +17,49 @@ For the players.
 
 ---
 
+## TL;DR — Build the ROM
+
+Yes, it builds, and yes it's **Docker**. One command from the repo root:
+
+```bash
+./build-rom.sh
+```
+
+ROMs land in `output/`. First run also compiles the libdragon host tools into
+`.hosttools/bin/` (a few minutes, one time only).
+
+`output/OS64.v64` should be **≈ 1.9 MB**. That's the default now — covers load from the SD card.
+
+**Cover art for the SD card** (one command, ~80 MB payload):
+
+```bash
+./tools/make_sdcard_boxart.sh
+# then copy sdcard-boxart-full/menu/ onto your SD card root
+```
+
+**One-time setup**, if you've never built here before — the build image must exist under the
+exact name `n64flashcartmenu-dev:latest`:
+
+```bash
+docker build -t n64flashcartmenu-dev:latest -f .devcontainer/flashcart/Dockerfile.sc64deployer .
+```
+
+**If the build fails after changing toolchain/image, nuke `build/` first** (it's root-owned by
+Docker, so a plain `rm -rf build` won't work):
+
+```bash
+docker run --rm -v "$PWD:/project" n64flashcartmenu-dev:latest rm -rf /project/build
+./build-rom.sh
+```
+
+> ⚠️ A fresh clone additionally needs libdragon **built** before the first ROM build — the repo
+> pins the submodule but not its compiled `.a` files. See
+> [§2 Fresh clones](#libdragon-submodule-and-fresh-clones).
+
+See **[§2 Build system](#2-build-system)** for the full story.
+
+---
+
 ## 1. Highlights
 
 - **Favorites Grid** is the home screen — a masonry layout of cover art, not a file list.
@@ -56,22 +99,250 @@ For the players.
 ## 2. Build system
 
 ### Toolchain
-- Built in Docker image `n64flashcartmenu-dev:latest` (mips64-elf cross-tools only).
-- libdragon is the in-repo submodule; its **library artifacts** (`libdragon.a`, `n64.mk`,
-  linker scripts, headers, `libcart/cart.h`) are copied into `/opt/libdragon` before `make`.
+- Built in Docker image `n64flashcartmenu-dev:latest` (mips64-elf cross-tools only, currently
+  GCC 14.4.0). Built from `.devcontainer/flashcart/Dockerfile.sc64deployer` — see
+  [How to build](#how-to-build) step 0.
+- libdragon is a submodule pinned to **`5cb976aa`** — do **not** bump it, see
+  [libdragon submodule](#libdragon-submodule-and-fresh-clones).
+  Its **library artifacts** (`libdragon.a`, `n64.mk`, linker scripts, headers, `libcart/cart.h`)
+  are copied into `/opt/libdragon` before `make`.
 - libdragon **host tools** are NOT in the image. Linux builds of
   `n64sym`, `n64tool`, `n64elfcompress`, `ed64romconfig`, `mkdfs` live in
   **`repo/.hosttools/bin/`** and are copied into `/opt/libdragon/bin` per build.
 
 ### How to build
+
+**Requirements:** Docker, and a `libdragon/` that has been **built** at least once — a fresh
+clone gets the source but not the `.a` files (see
+[libdragon submodule](#libdragon-submodule-and-fresh-clones)).
+
+**Step 0 — build the Docker image (one time).** `build-rom.sh` hardcodes the image name
+`n64flashcartmenu-dev:latest` and does *not* build it for you. If it's missing, Docker will try
+to pull it from Docker Hub and fail. Build it from the devcontainer Dockerfile:
+
+```bash
+docker build -t n64flashcartmenu-dev:latest -f .devcontainer/flashcart/Dockerfile.sc64deployer .
 ```
-./build-rom.sh           # from the repo parent dir (N64ever/)
+
+> If you already have this image under a different local tag (e.g. `n64menu-builder:latest`),
+> just retag it: `docker tag n64menu-builder:latest n64flashcartmenu-dev:latest`
+
+**Step 1 — build the ROM.** From the repo root:
+
+```bash
+./build-rom.sh
 ```
-Produces (under `repo/output/`):
+
+The script resolves its own directory, so it works from any cwd. Arguments are passed straight
+through to `make` inside the container (e.g. `./build-rom.sh clean`, `./build-rom.sh sc64`).
+
+On the **first** run it automatically invokes `build-tools.sh`, which compiles the libdragon
+**host tools** from source inside the container into `.hosttools/bin/`. This takes a few minutes
+and only happens once (it's skipped whenever `.hosttools/bin/mksprite` already exists).
+
+Produces (under `output/`):
 - `sc64menu.n64`  — SC64
 - `OS64.v64` / `OS64P.v64` — ED64 / ED64 clone
 - `menu.bin` — 64drive
 - `N64FlashcartMenu.n64` — the raw ROM
+
+> `OS64_FixLargeRom_CoverArtOnSD.v64` and `OS64-LITE-noboxart.v64` in `output/` are **not**
+> Makefile targets — they're hand-renamed release copies and are never refreshed by a build.
+> Don't trust their timestamps.
+
+### Verified working
+
+Last verified **2026-07-26** on Fedora (Linux 7.0.12), Docker 29.6.0:
+
+- Clean build exits 0 and writes fresh ROMs. Getting there required `rm -rf build` first — see
+  the stale-objects trap below.
+- Default build → `output/OS64.v64` = **1.86 MB**, matching the known-good
+  `OS64_FixLargeRom_CoverArtOnSD.v64` exactly.
+- Large-ROM fix confirmed linked in: 6 × `0xaa55` EDX_KEY register writes in the ELF (the LL
+  helpers are LTO-inlined, so they carry no symbols).
+- `BAKE_BOXART=1` still parses and would build all 3160 sprites.
+- `LIBDRAGON_VERSION` resolves to `5cb976a` (was `unknown`).
+
+### Clean builds — when `build/` must go
+
+`make clean` only removes the files it currently *lists*, so it does **not** rescue you from a
+toolchain change. Delete the whole directory instead — **but `build/` is root-owned** (Docker
+wrote it), so a plain host `rm -rf build` fails with *Permission denied*. Delete it from inside
+the container:
+
+```bash
+docker run --rm -v "$PWD:/project" n64flashcartmenu-dev:latest rm -rf /project/build
+./build-rom.sh
+```
+
+Two real failure modes seen in this repo, both fixed only by `rm -rf build`:
+
+- **`No rule to make target '<abs-host-path>/.n64inst/.../utime.h'`** — a `.d` dependency file
+  left over from a *host-side* (non-Docker) build that used `N64_INST=$PWD/.n64inst`. Those
+  absolute host paths don't exist inside the container, so `make` gives up.
+- **`lto1: internal compiler error: original not compressed with zstd`** — `build/` contains
+  `.o` files produced by a *different GCC* than the container's (currently mips64-elf 14.4.0).
+  LTO can't read the older objects and the link dies. Not a code bug; purely stale objects.
+
+### ROM size: `BAKE_BOXART` (the small ROM is the correct one)
+
+**Target: `OS64.v64` ≈ 1.9 MB — this is now the default.**
+
+Why it matters: the krikzz EverDrive-64 X-series bootloader **cannot load a 48 MB `OS64.v64` at
+all**. This is a boot-time ROM-size limit, not runtime RAM, and not caused by our large-ROM fix —
+the *official* 48 MB release binary fails identically, while the 1.67 MB upstream menu and a
+~1.9 MB stripped build boot fine. (Confirmed on an Analogue too: 8 MB baked still black-screened
+at 48 MB.) That is the entire reason cover art moved to the SD card.
+
+| | ROM | Boots on ED64 X-series | Cover art from |
+|---|---|---|---|
+| `BAKE_BOXART=0` **(default)** | ~1.9 MB | ✅ yes | SD card (`menu/metadata/...`) |
+| `BAKE_BOXART=1` (legacy) | ~48 MB | ❌ **no** | baked into the DFS |
+
+```bash
+./build-rom.sh                      # 1.9 MB, covers from SD  <- what you want
+BAKE_BOXART=1 ./build-rom.sh        # 48 MB legacy bake, SC64/64drive experiments only
+```
+
+**Do not "strip the art by hand."** Earlier builds got the small ROM by deleting
+`assets/images/boxart/` — but that directory is **gitignored and the only copy** of the source
+library, and it's what `tools/make_sdcard_boxart.sh` needs. The switch replaces that workaround.
+
+Implementation notes, since two separate things had to be handled:
+- The Makefile only expands `BOXART_SPRITES` when `BAKE_BOXART=1`.
+- `mkdfs` packs the **entire** `filesystem/` tree regardless of the Makefile's `FILESYSTEM` list,
+  so `build-rom.sh` also deletes `filesystem/boxart/` and forces a DFS repack when baking is off.
+  That prune runs *inside* the container because Docker owns those files (see below).
+
+**The `.cache` files do not affect ROM size.** They live on the SD card next to the PNGs, not in
+the DFS. Pre-generating them only removes the on-console PNG decode so covers appear instantly.
+If the ROM is large, the cause is baked sprites in the DFS — never the cache.
+
+### Docker leaves root-owned files in the repo
+
+The container runs as root, so `build/`, `filesystem/` and `.hosttools/` end up owned by `root`.
+Consequences you will hit:
+
+- Host-side `rm -rf filesystem/boxart` fails with *Permission denied* — that cleanup has to run
+  inside the container.
+- Don't compile host tools into `.hosttools/bin/`; `tools/make_sdcard_boxart.sh` builds into
+  `.hostbin/` (host-owned) for exactly this reason.
+
+### Cover art: making the SD card payload
+
+```bash
+./tools/make_sdcard_boxart.sh              # -> sdcard-boxart-full/  (~80 MB)
+./tools/make_sdcard_boxart.sh /some/dir    # custom output location
+```
+
+Then copy the resulting **`menu/`** onto your SD card root, merging into any existing `menu/`.
+Current library: **447 games, 1252 images** (front + back + cart), each with a pre-built `.cache`.
+
+The script does three things:
+
+1. Compiles [`tools/gen_boxart_cache.c`](tools/gen_boxart_cache.c) against the fork's **own**
+   libspng submodule — using the same decoder as the firmware is what makes the output
+   byte-identical to what the console would write.
+2. Lays out `menu/metadata/<C>/<O>/<D>/{boxart_front,boxart_back,gamepak_front}.png`.
+3. Pre-generates a `.cache` beside every PNG.
+
+**Why the 3-char path.** A ROM code is 4 chars: bytes 0–2 are the game, byte 3 is the region.
+`boxart.c`'s `try_metadata_png()` does a `path_pop` (strips one segment), so art placed at the
+3-char level matches **any** region dump of that game — one cover serves E/P/J/U/… For each game
+the script picks one source dir, preferring regions in order `E P J U A X F D I S`.
+
+Only **front / back / cart** load from SD metadata (`cart.png` → `gamepak_front.png`).
+`box3d`, `cart3d` and `logo` are DFS-or-custom only and are deliberately not copied.
+
+> **Keep the PNGs on the card.** The menu reads the PNG's size before trusting the cache;
+> deleting the PNGs invalidates every cache.
+
+### Box-art SD cache (`.cache`)
+
+Cover art is read from the SD card and cached as `.cache` files alongside each PNG. Format,
+written big-endian by [`png_decoder.c`](src/utils/png_decoder.c):
+
+| Field | Size | Value |
+|---|---|---|
+| `png_size` | u32 | byte size of the source PNG |
+| `width` / `height` | u16 each | native PNG dims (≤ 158×158, never scaled) |
+| `stride` | u32 | `width × 2` |
+| pixels | `w·h·2` | RGBA5551, alpha bit always 1 |
+
+Header is 12 bytes; total file is `12 + w·h·2`. `load_cache` rejects the cache unless `stride`
+matches exactly, and re-checks `png_size` against the live PNG — so the cache is **self-healing**:
+swap a cover and the stale entry is discarded and rebuilt on device.
+
+Verified against a known cover (DK64, `N/D/O`): PNG 158×111, 48530 bytes → cache header
+`png_size=48530 w=158 h=111 stride=316`, file size 35088 = `12 + 158·111·2`. Exact.
+
+> The generator was lost when the project moved into this fork and was **restored 2026-07-26**
+> from the original session transcript — it now lives at
+> [`tools/gen_boxart_cache.c`](tools/gen_boxart_cache.c) and is tracked in git, not a scratchpad.
+
+### libdragon submodule and fresh clones
+
+**The pin:**
+
+```
+libdragon @ 5cb976aab11eb30622c33b112c120a1107eedb5e   (branch: preview, 2026-05-12)
+"revert workarounds in rdpq_set_tile_size_fx and ROUND_DOWN"
+```
+
+**What was wrong.** `.gitmodules` declared `libdragon`, but `.gitignore` contained `/libdragon`,
+which stopped git from ever recording a gitlink — the declaration was inert. Only three gitlinks
+existed (libspng, minimp3, miniz), and `git clone --recursive` produced **no `libdragon/` at
+all**. On top of that, `libdragon/.git` pointed at a `.git/modules/libdragon` that didn't exist,
+so the local tree was orphaned: `git -C libdragon describe` failed and `build-rom.sh` silently
+fell back to `LIBDRAGON_VERSION="unknown"` (which is what Menu Information showed).
+
+**How the revision was recovered.** The orphaned tree carried no git metadata, so the commit was
+identified by diffing it against upstream `preview`: `include/`, `src/`, `n64.mk` and `n64.ld`
+all match `5cb976aa` byte-for-byte (only untracked `.o`/`.d`/`.a` build artifacts differ).
+
+**What was done.** `/libdragon` removed from `.gitignore`; the existing tree re-attached to
+upstream at that commit and absorbed into `.git/modules/libdragon` — deliberately *without*
+`rm -rf libdragon`, so the prebuilt `.a` files `build-rom.sh` depends on survived. All four
+submodules now register, and `LIBDRAGON_VERSION` resolves to `5cb976a` instead of `unknown`.
+
+> **Fresh clones still need libdragon built first.** `build-rom.sh` copies **prebuilt artifacts**
+> out of `libdragon/` (`libdragon.a`, `libdragonsys.a`, `n64.ld`, `dso.ld`, `rsp.ld`). Those are
+> build outputs, not source, so a freshly-checked-out submodule has none of them. Until
+> `build-rom.sh` learns to build libdragon on demand, do it once by hand:
+>
+> ```bash
+> git submodule update --init
+> cd libdragon && make clobber -j && make libdragon tools -j && make install tools-install -j
+> ```
+>
+> This is the remaining gap — the gitlink is fixed, the bootstrap is not.
+
+> ### ⛔ Do NOT bump libdragon
+>
+> This fork is pinned to `5cb976aa` **on purpose**. Newer libdragon renamed the COP0 status
+> macros, and [`src/boot/boot.c:155`](src/boot/boot.c#L155) uses
+> `C0_STATUS_CU1 | C0_STATUS_CU0 | C0_STATUS_FR`. Building against a newer libdragon
+> (e.g. `43c67df`) fails there. This was hit and diagnosed during the original port — it is
+> a fork-vs-libdragon API drift, unrelated to the large-ROM fix.
+
+**To fix properly:**
+
+1. Remove `/libdragon` from `.gitignore`.
+2. Register the gitlink at the verified commit. Prefer the **non-destructive** route — the local
+   tree already contains prebuilt `libdragon.a`/`libdragonsys.a` that `build-rom.sh` depends on,
+   and `rm -rf libdragon` would throw them away:
+   ```bash
+   rm libdragon/.git                                  # stale pointer to a missing gitdir
+   git -C libdragon init -q
+   git -C libdragon remote add origin https://github.com/DragonMinded/libdragon
+   git -C libdragon fetch --depth 1 origin 5cb976aab11eb30622c33b112c120a1107eedb5e
+   git -C libdragon reset --hard FETCH_HEAD           # untracked .a files survive this
+   git add libdragon                                  # now creates the 160000 gitlink
+   ```
+3. Extend `build-rom.sh` to build libdragon when `libdragon/libdragon.a` is missing, instead of
+   assuming prebuilt artifacts are present. Without this, a fresh clone still won't link — the
+   devcontainer's `postCreateCommand` shows the needed steps.
+4. Confirm with a throwaway `git clone --recursive` that the clone builds before trusting it.
 
 ### Build number / versions
 `MENU_VERSION` (Makefile, default a build number e.g. `"300"`) is compiled into the credits
@@ -96,6 +367,16 @@ stay fast.
   baked art. After touching baked art: `rm build/*.dfs` and rebuild.
 - **Non-deterministic:** builds aren't byte-reproducible. Verify changes via the ELF, not SHA.
 - `n64sym` (debug symbols) is non-fatal in this environment.
+- **Stale object trap:** objects in `build/` from a different toolchain break the LTO link, and
+  `.d` files from a host-side build reference absolute host paths that don't exist in the
+  container. `make clean` does not fix either — use `rm -rf build`. See
+  [Clean builds](#clean-builds--when-build-must-go).
+- **Silent 25× ROM bloat (now guarded):** baking the art library into the DFS gives a 48 MB ROM
+  that **cannot boot on ED64 X-series**. `BAKE_BOXART` now defaults to `0`, and `build-rom.sh`
+  prunes stale `filesystem/boxart/` — but if you ever pass `BAKE_BOXART=1`, check the size. See
+  [ROM size](#rom-size-bake_boxart-the-small-rom-is-the-correct-one).
+- **Root-owned files:** Docker writes `build/`, `filesystem/` and `.hosttools/` as root; host-side
+  cleanup of those paths fails with *Permission denied*. Do such cleanup inside the container.
 
 ---
 

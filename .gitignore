@@ -13,9 +13,11 @@
 /filesystem/*.wav64
 /filesystem/*.sprite
 
-# Ignore external development tools (but keep our SFX generator)
+# Ignore external development tools (but keep the ones we wrote)
 /tools/*
 !/tools/gen_sfx.py
+!/tools/gen_boxart_cache.c
+!/tools/make_sdcard_boxart.sh
 
 # Ignore n64 tools
 /.n64inst
@@ -41,3 +43,6 @@
 # --- N64ever: exclude build output + host tools (the box-art library IS tracked) ---
 /filesystem/
 /.hosttools/
+/.hostbin/
+/sdcard-boxart-full/
+/sdcard-boxart-test/
