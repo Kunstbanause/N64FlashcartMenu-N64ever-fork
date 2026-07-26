@@ -3,9 +3,13 @@
 #
 # The dev image ships only the mips64-elf cross-tools; libdragon itself and the
 # libdragon *host* tools (n64sym/n64tool/n64elfcompress) are not installed. We:
-#   1. install the prebuilt libdragon library artifacts from the submodule, and
+#   0. build libdragon.a/libdragonsys.a from the pinned submodule if they are
+#      missing (they are build outputs, so a fresh clone has none),
+#   1. install those libdragon library artifacts into /opt/libdragon, and
 #   2. install Linux host-tool binaries from repo/.hosttools/bin (built once,
 #      see below) so the .z64 link step actually runs to completion.
+#
+# So a fresh `git clone --recursive` + `./build-rom.sh` is all that is needed.
 #
 # Without the host tools the z64 recipe aborts on the very first command
 # (n64sym), which silently leaves output/sc64menu.n64 STALE.
@@ -19,6 +23,33 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
+IMAGE=n64flashcartmenu-dev:latest
+
+# Fail early and usefully: without the image, docker would try to pull it from Docker Hub and
+# die with a confusing "not found".
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "error: docker image '$IMAGE' not found. Build it once with:" >&2
+  echo "  docker build -t $IMAGE -f .devcontainer/flashcart/Dockerfile.sc64deployer ." >&2
+  exit 1
+fi
+
+# The libdragon submodule must actually be checked out.
+if [ ! -f "$REPO/libdragon/Makefile" ]; then
+  echo "error: libdragon/ is empty. Run: git submodule update --init" >&2
+  exit 1
+fi
+
+# libdragon.a / libdragonsys.a are BUILD OUTPUTS, not source, so a fresh submodule checkout has
+# neither -- and the copy step below would fail. Build them once from the pinned source.
+# (Everything else we copy out of libdragon/ -- n64.mk, the linker scripts, headers -- is tracked.)
+if [ ! -f "$REPO/libdragon/libdragon.a" ] || [ ! -f "$REPO/libdragon/libdragonsys.a" ]; then
+  echo "[libdragon] building library artifacts from the pinned source (one-time, a few minutes)..."
+  docker run --rm -v "$REPO:/project" -w /project/libdragon "$IMAGE" bash -lc '
+    set -e
+    N64_INST=/opt/libdragon make -j"$(nproc)" libdragon
+  '
+  echo "[libdragon] done -> libdragon/libdragon.a"
+fi
 
 # Host tools are NOT shipped prebuilt (some embed GPL/FTL libs -- see build-tools.sh).
 # Build them from the bundled libdragon source the first time, into .hosttools/bin/.
@@ -62,7 +93,7 @@ if [ -d "$REPO/filesystem" ]; then
   [ "$orphans" -gt 0 ] && echo "[hygiene] removed $orphans orphan"
 fi
 
-docker run --rm -e LIBDRAGON_VERSION="$LIBDRAGON_VERSION" -e MENU_BASE_VERSION="$MENU_BASE_VERSION" -e BAKE_BOXART="$BAKE_BOXART" -v "$REPO:/project" -w /project n64flashcartmenu-dev:latest bash -c '
+docker run --rm -e LIBDRAGON_VERSION="$LIBDRAGON_VERSION" -e MENU_BASE_VERSION="$MENU_BASE_VERSION" -e BAKE_BOXART="$BAKE_BOXART" -v "$REPO:/project" -w /project "$IMAGE" bash -c '
   set -e
   N64_INST=/opt/libdragon
 
