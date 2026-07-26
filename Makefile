@@ -133,12 +133,28 @@ MINIZ_OBJS = $(filter $(BUILD_DIR)/libs/miniz/%.o,$(OBJS))
 SPNG_OBJS = $(filter $(BUILD_DIR)/libs/libspng/%.o,$(OBJS))
 DEPS = $(OBJS:.o=.d)
 
-# Boxart art baked into the DFS, keyed by ROM code: assets/images/boxart/<CODE>/<type>.png
-# -> filesystem/boxart/<CODE>/<type>.sprite, loaded at runtime as
-# rom:/boxart/<CODE>/<type>.sprite. Subdirectory structure is preserved (unlike the
-# flat $(notdir ...) image rule), so codes don't collide.
+# --- Cover art delivery ------------------------------------------------------------------
+# BAKE_BOXART=0 (DEFAULT)  covers load from the SD card at menu/metadata/<C>/<O>/<D>/...
+#                          ROM stays ~1.9 MB. REQUIRED for EverDrive-64 X-series: the krikzz
+#                          bootloader cannot load a 48 MB OS64.v64 at all (verified -- the
+#                          official 48 MB release binary fails identically, so it is a
+#                          boot-time ROM-size limit, not a runtime RAM limit and not our fix).
+#                          Build the SD payload with tools/make_sdcard_boxart.sh.
+# BAKE_BOXART=1            LEGACY: bake every cover into the DFS -> ~48 MB ROM. Will NOT boot on
+#                          ED64 X-series. Kept only for SC64/64drive experiments.
+#
+# Baked path, when enabled: assets/images/boxart/<CODE>/<type>.png
+# -> filesystem/boxart/<CODE>/<type>.sprite, loaded at runtime as rom:/boxart/<CODE>/<type>.sprite.
+# Subdirectory structure is preserved (unlike the flat $(notdir ...) image rule), so codes
+# don't collide.
+BAKE_BOXART ?= 0
+
 BOXART_PNGS    = $(shell find $(ASSETS_DIR)/images/boxart -name '*.png' 2>/dev/null)
+ifeq ($(BAKE_BOXART),1)
 BOXART_SPRITES = $(patsubst $(ASSETS_DIR)/images/%.png,$(FILESYSTEM_DIR)/%.sprite,$(BOXART_PNGS))
+else
+BOXART_SPRITES =
+endif
 
 FILESYSTEM = \
 	$(addprefix $(FILESYSTEM_DIR)/, $(notdir $(FONTS:%.ttf=%.font64))) \
@@ -175,7 +191,11 @@ $(FILESYSTEM_DIR)/%.sprite: $(ASSETS_DIR)/images/%.png
 # LaunchBox re-source). Other types: plain RGBA16 (printed art doesn't band).
 MKBOXART_FMT = RGBA16
 MKBOXART_DITHER =
+# Guarded: with BAKE_BOXART=0 the filter yields nothing, and a rule with an empty target list is
+# a make syntax error ("*** No targets").
+ifeq ($(BAKE_BOXART),1)
 $(filter %/cart3d.sprite,$(BOXART_SPRITES)): MKBOXART_DITHER := --dither ORDERED
+endif
 $(FILESYSTEM_DIR)/boxart/%.sprite: $(ASSETS_DIR)/images/boxart/%.png
 	@mkdir -p $(dir $@)
 	@$(N64_MKSPRITE) --format $(MKBOXART_FMT) $(MKBOXART_DITHER) --compress 3 -o $(dir $@) "$<"

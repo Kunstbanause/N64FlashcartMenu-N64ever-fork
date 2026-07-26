@@ -37,12 +37,21 @@ LIBDRAGON_VERSION="$(git -C "$REPO/libdragon" describe --tags --always --dirty 2
 MENU_BASE_VERSION="$(git -C "$REPO" describe --tags --abbrev=0 2>/dev/null || true)"
 [ -z "$MENU_BASE_VERSION" ] && MENU_BASE_VERSION="unknown"
 
+# --- Cover art mode ----------------------------------------------------------
+# Default 0 = covers on SD card, ~1.9 MB ROM (required for ED64 X-series; see Makefile).
+# Override with: BAKE_BOXART=1 ./build-rom.sh
+BAKE_BOXART="${BAKE_BOXART:-0}"
+
 # --- Build hygiene -----------------------------------------------------------
 # mkdfs packs the ENTIRE filesystem/ tree, and `make clean` only removes the files
 # it currently lists -- so leftovers get silently baked into the ROM:
 #   * macOS .DS_Store (junk), and
 #   * orphan *.sprite
 find "$REPO/filesystem" "$REPO/assets" -name '.DS_Store' -delete 2>/dev/null || true
+
+# NOTE: pruning baked sprites for BAKE_BOXART=0 happens INSIDE the container (see below).
+# Docker runs as root and creates root-owned files under filesystem/ and build/, which an
+# unprivileged host `rm` cannot delete.
 if [ -d "$REPO/filesystem" ]; then
   orphans=0
   while IFS= read -r spr; do
@@ -53,7 +62,7 @@ if [ -d "$REPO/filesystem" ]; then
   [ "$orphans" -gt 0 ] && echo "[hygiene] removed $orphans orphan"
 fi
 
-docker run --rm -e LIBDRAGON_VERSION="$LIBDRAGON_VERSION" -e MENU_BASE_VERSION="$MENU_BASE_VERSION" -v "$REPO:/project" -w /project n64flashcartmenu-dev:latest bash -c '
+docker run --rm -e LIBDRAGON_VERSION="$LIBDRAGON_VERSION" -e MENU_BASE_VERSION="$MENU_BASE_VERSION" -e BAKE_BOXART="$BAKE_BOXART" -v "$REPO:/project" -w /project n64flashcartmenu-dev:latest bash -c '
   set -e
   N64_INST=/opt/libdragon
 
@@ -75,5 +84,14 @@ docker run --rm -e LIBDRAGON_VERSION="$LIBDRAGON_VERSION" -e MENU_BASE_VERSION="
   # Linux host tools (persisted in repo/.hosttools/bin)
   cp /project/.hosttools/bin/* $N64_INST/bin/
 
-  N64_INST=$N64_INST make -j$(nproc) LIBDRAGON_VERSION="$LIBDRAGON_VERSION" MENU_BASE_VERSION="$MENU_BASE_VERSION" "$@"
+  # mkdfs packs the ENTIRE filesystem/ tree regardless of the Makefile FILESYSTEM list, so with
+  # BAKE_BOXART=0 previously-baked sprites would still be packed and silently yield a ~48 MB ROM.
+  # Done here (as root) because Docker owns those files. assets/ is never touched.
+  if [ "$BAKE_BOXART" != "1" ] && [ -d /project/filesystem/boxart ]; then
+    echo "[hygiene] BAKE_BOXART=0 -> dropping baked filesystem/boxart (covers load from SD)"
+    rm -rf /project/filesystem/boxart
+    rm -f /project/build/*.dfs   # force a repack; mkdfs only rebuilds on newer mtimes
+  fi
+
+  N64_INST=$N64_INST make -j$(nproc) LIBDRAGON_VERSION="$LIBDRAGON_VERSION" MENU_BASE_VERSION="$MENU_BASE_VERSION" BAKE_BOXART="$BAKE_BOXART" "$@"
 ' -- "$@"
