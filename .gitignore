@@ -20,8 +20,8 @@
 # Ignore n64 tools
 /.n64inst
 
-# libdragon
-/libdragon
+# libdragon is a real submodule (pinned to 5cb976aa) -- do NOT ignore it, that is exactly what
+# prevented git from ever recording its gitlink and made fresh clones unbuildable.
 
 # Ignore cover art assets
 /boxart
