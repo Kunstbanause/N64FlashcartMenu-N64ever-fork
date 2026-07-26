@@ -47,6 +47,25 @@ char *file_basename(char *path);
  */
 bool file_exists(char *path);
 
+/** @brief Result of #file_presence. */
+typedef enum {
+    FILE_PRESENCE_ABSENT,   /**< Confirmed not there. */
+    FILE_PRESENCE_PRESENT,  /**< Confirmed present, as a regular file. */
+    FILE_PRESENCE_UNKNOWN,  /**< Could not tell: I/O error, card not ready, etc. */
+} file_presence_t;
+
+/**
+ * @brief Check whether a file is present, distinguishing "absent" from "couldn't tell".
+ *
+ * #file_exists collapses both into false, which is fine for "should I read this?" but
+ * dangerous for "may I delete/overwrite this?" -- a momentary SD read error then looks
+ * exactly like a missing file. Use this wherever a negative answer would destroy data.
+ *
+ * @param path The path to the file.
+ * @return Whether the file is absent, present, or indeterminate.
+ */
+file_presence_t file_presence(char *path);
+
 /**
  * @brief Get the size of a file at the given path.
  *

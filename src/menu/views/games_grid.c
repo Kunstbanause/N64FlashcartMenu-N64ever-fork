@@ -50,9 +50,11 @@ static int grid_y0(void) {
 #define LAND_H              74
 #define PORT_W              80      /* Japanese vertical cover cell (taller, narrower) */
 #define PORT_H              112
-/* Filename caption strip carved off the bottom of a tile's art when captions are on (library
-   tabs always; Favorites opt-in) -- disambiguates ROM hacks that share their base game's art. */
-#define TILE_CAPTION_H      14
+/* Filename caption strip ADDED to the bottom of a tile when captions are on (library tabs
+   always; Favorites opt-in) -- disambiguates ROM hacks that share their base game's art.
+   Its height is measured from the live font at runtime (see caption_line_h), never
+   hardcoded: rdpq silently discards a text line that doesn't fit its box. */
+#define CAPTION_PAD         2       /* breathing room between the art edge and the glyphs */
 
 /* ---------- Inspect popup ---------- */
 /* 2+2 inspect layout: smaller frame; top band = art | description (with a
@@ -531,6 +533,43 @@ static bool fav_is_portrait(int gi) {
     return gv_is_box && fav_entry_cache[fav_indices[gi]].destination_code == MARKET_JAPANESE;
 }
 
+/* Library tabs always caption their tiles (a pinned folder is typically full of ROM hacks
+   that share one base game's art); the Favorites tab is opt-in via the setting. */
+static bool grid_captions_on(void) {
+    return (grid_tab != 0) || grid_caption_favs;
+}
+
+static int caption_h_cached = 0;    /* 0 = not measured yet */
+
+/* Height of the filename caption strip, measured from whatever font is loaded.
+   This CANNOT be a hardcoded constant: rdpq DISCARDS a text line outright when the box is
+   shorter than the font's line height (rdpq_paragraph.c: `ascent - descent >= height`
+   -> skip_current_line), so an undersized strip renders NOTHING rather than clipping --
+   which is exactly how the original 14px constant failed silently, the bundled 12px font
+   needing 15. Measuring keeps a legacy or SD custom.font64 from resurrecting the bug.
+
+   Ask the layout engine directly -- lay a line out at each height and take the first that
+   actually emits glyphs -- rather than deriving it from the reported bbox: a laid-out
+   line's bbox is (ascent - descent + line_gap + 1), and mkfont gives BOTH bundled fonts a
+   line_gap of -1, so the bbox reads one pixel UNDER the height the skip test demands. */
+static int caption_line_h(void) {
+    if (caption_h_cached) return caption_h_cached;
+
+    for (int h = 8; h <= 64; h++) {
+        /* A skipped line lays out zero chars -- that is the signal we're looking for. */
+        int nbytes = 2;
+        rdpq_paragraph_t *p = rdpq_paragraph_build(
+            &(rdpq_textparms_t){ .width = 64, .height = h, .wrap = WRAP_ELLIPSES },
+            FNT_DEFAULT, "Ag", &nbytes);
+        bool fits = p && p->nchars > 0;
+        if (p) rdpq_paragraph_free(p);
+        if (fits) { caption_h_cached = h + CAPTION_PAD; return caption_h_cached; }
+    }
+
+    caption_h_cached = 15 + CAPTION_PAD;   /* unreachable in practice; keep the strip usable */
+    return caption_h_cached;
+}
+
 /* Flow the favorites (in order) into rows of variable width: landscape covers are
    wide, Japanese covers are narrow, so JP-heavy rows pack more across and any row
    that holds a vertical cover grows taller. */
@@ -539,6 +578,9 @@ static void compute_flow(void) {
     int right = GRID_X1 - G_PADX;
     int avail = right - left;
     int x = left, row = 0, rh = 0;
+    /* The caption strip is ADDED to the cell rather than carved out of it, so cover art
+       keeps its designed size when captions are on (at the cost of ~one row per screen). */
+    int cap = grid_captions_on() ? caption_line_h() : 0;
 
     /* Pass 1: assign tiles to rows, left-aligned */
     for (int gi = 0; gi < fav_count; gi++) {
@@ -546,6 +588,7 @@ static void compute_flow(void) {
         int w = grid_sq ? LAND_W : (port ? PORT_W : LAND_W);
         int h = grid_sq ? LAND_W : (port ? PORT_H : LAND_H);
         if (grid_large) { w = w * 13 / 10; h = h * 13 / 10; }   /* Large tiles: ~30% bigger -> ~one less row */
+        h += cap;   /* after the Large scaling: text doesn't grow with the tile */
         if (x + w > right && x > left) { row++; x = left; rh = 0; }
         if (x == left) row_first[row] = gi;
         row_of[gi] = row; xof[gi] = x; wof[gi] = w; hof[gi] = h;
@@ -1261,6 +1304,35 @@ static void refresh_grid(menu_t *menu) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Draw the ROM's filename (extension stripped) into the caption strip at the bottom of a
+   tile. This is the only thing that tells ROM hacks apart: they share their base game's
+   game code, so they resolve to the same cover art AND the same metadata DB name. */
+static void draw_tile_caption(int fav_i, int x0, int y, int w, int h) {
+    char cap[64] = "";
+    const char *fn = path_last_get(grid_items[fav_i].primary_path);
+    if (fn) {
+        strncpy(cap, fn, sizeof(cap) - 1);
+        cap[sizeof(cap) - 1] = '\0';
+        char *dot = strrchr(cap, '.');
+        if (dot) *dot = '\0';
+        sanitize_display_name(cap);
+    }
+    if (!cap[0]) return;
+
+    rdpq_text_printn(
+        &(rdpq_textparms_t){
+            .width   = w,
+            .height  = h,
+            .align   = ALIGN_CENTER,
+            .valign  = VALIGN_CENTER,
+            .wrap    = WRAP_ELLIPSES,
+        },
+        FNT_DEFAULT,
+        x0, y,
+        cap, strlen(cap)
+    );
+}
+
 /* anim_f 0.0=not selected, 1.0=fully selected — scales size and glow.
    The cell already matches the cover's orientation, so the rainbow rim hugs
    the art instead of a loose square. */
@@ -1293,15 +1365,17 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
     int inner_w = x1 - x0;
     int inner_h = y1 - y0;
 
-    if (b && !b->loading && b->image) {
-        /* Duplicate-art disambiguation: ROM hacks correctly match their base game's art (same
-           game code), so several hacks can render as identical tiles -- a filename caption tells
-           them apart. Always on for library tabs; opt-in for Favorites. */
-        bool show_caption = (grid_tab != 0) || grid_caption_favs;
-        int  cap_h = show_caption ? TILE_CAPTION_H : 0;
-        int  art_h = inner_h - cap_h;
-        if (art_h < 1) art_h = 1;
+    /* Duplicate-art disambiguation: ROM hacks correctly match their base game's art (same
+       game code), so several hacks can render as identical tiles -- a filename caption tells
+       them apart. compute_flow() already grew the cell by cap_h, so the art band below is
+       the tile's designed size. Note the hover enlarge inflates inner_h but not cap_h, so
+       the selection's extra pixels go to the art and the strip stays a constant height. */
+    bool show_caption = grid_captions_on();
+    int  cap_h = show_caption ? caption_line_h() : 0;
+    int  art_h = inner_h - cap_h;
+    if (art_h < 1) art_h = 1;
 
+    if (b && !b->loading && b->image) {
         float sx = (float)inner_w / b->image->width;
         float sy = (float)art_h / b->image->height;
         float scale = (sx < sy) ? sx : sy;
@@ -1319,29 +1393,7 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
         rdpq_mode_pop();
 
         if (show_caption) {
-            char cap[64] = "";
-            const char *fn = path_last_get(grid_items[fav_i].primary_path);
-            if (fn) {
-                strncpy(cap, fn, sizeof(cap) - 1);
-                cap[sizeof(cap) - 1] = '\0';
-                char *dot = strrchr(cap, '.');
-                if (dot) *dot = '\0';
-                sanitize_display_name(cap);
-            }
-            if (cap[0]) {
-                rdpq_text_printn(
-                    &(rdpq_textparms_t){
-                        .width   = inner_w,
-                        .height  = cap_h,
-                        .align   = ALIGN_CENTER,
-                        .valign  = VALIGN_CENTER,
-                        .wrap    = WRAP_ELLIPSES,
-                    },
-                    FNT_DEFAULT,
-                    x0, y0 + art_h,
-                    cap, strlen(cap)
-                );
-            }
+            draw_tile_caption(fav_i, x0, y0 + art_h, inner_w, cap_h);
         }
     } else {
         /* No art: show the display name — prefer the looked-up name (meta_name:
@@ -1363,7 +1415,7 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
             rdpq_text_printn(
                 &(rdpq_textparms_t){
                     .width   = inner_w,
-                    .height  = inner_h,
+                    .height  = art_h,
                     .align   = ALIGN_CENTER,
                     .valign  = VALIGN_CENTER,
                     .wrap    = WRAP_WORD,
@@ -1373,11 +1425,17 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
                 name, tlen
             );
         } else if (fav_entry_cache[fav_i].is_disk) {
-            ui_components_disc_placeholder_draw(x0, y0, x1, y1);
+            ui_components_disc_placeholder_draw(x0, y0, x1, y1 - cap_h);
         } else {
             /* Name not resolved yet (no art, no code/DB hit): a grey cart
                placeholder reads better than a pure-black tile. */
-            ui_components_cart_placeholder_draw(x0, y0, x1, y1);
+            ui_components_cart_placeholder_draw(x0, y0, x1, y1 - cap_h);
+        }
+
+        /* Art-less hacks resolve to the same DB name as their base game, so they need the
+           filename caption just as much as the ones that share its cover art. */
+        if (show_caption) {
+            draw_tile_caption(fav_i, x0, y0 + art_h, inner_w, cap_h);
         }
     }
 }
@@ -4126,6 +4184,7 @@ void view_games_grid_init(menu_t *menu) {
     grid_sq              = menu->settings.grid_square_tiles;
     grid_large           = menu->settings.grid_large_tiles;
     grid_caption_favs    = menu->settings.grid_show_captions_favorites;
+    caption_h_cached     = 0;   /* re-measure: the font may have been swapped in Settings */
     gv_is_box            = is_box_view(menu->settings.image_view_grid);
     inspect_fav_i_cached = -1;
     if (inspect_logo) { sprite_free(inspect_logo); inspect_logo = NULL; }

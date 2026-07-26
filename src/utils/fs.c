@@ -58,6 +58,30 @@ bool file_exists(char *path) {
 }
 
 /**
+ * @brief Check whether a file is present, distinguishing "absent" from "couldn't tell".
+ *
+ * libdragon's FAT layer maps FR_NO_FILE/FR_NO_PATH to ENOENT and genuine trouble
+ * (FR_DISK_ERR, FR_NOT_READY, FR_TIMEOUT, ...) to EIO/EBUSY/ETIMEDOUT, so errno
+ * separates the two cases reliably. Anything that is not a plain "not found" is
+ * reported as UNKNOWN so callers can refuse to destroy data on a read hiccup.
+ *
+ * @param path The path to the file.
+ * @return Whether the file is absent, present, or indeterminate.
+ */
+file_presence_t file_presence(char *path) {
+    struct stat st;
+
+    errno = 0;
+    if (stat(path, &st) == 0) {
+        /* Something is there. If it isn't a regular file, that's an unexpected state --
+           report UNKNOWN rather than ABSENT so nobody deletes on the strength of it. */
+        return S_ISREG(st.st_mode) ? FILE_PRESENCE_PRESENT : FILE_PRESENCE_UNKNOWN;
+    }
+
+    return (errno == ENOENT) ? FILE_PRESENCE_ABSENT : FILE_PRESENCE_UNKNOWN;
+}
+
+/**
  * @brief Get the size of a file at the given path.
  *
  * Returns the size of the file at the specified path in bytes.

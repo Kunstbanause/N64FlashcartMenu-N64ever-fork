@@ -17,6 +17,12 @@ static char *favorites_path = NULL;
 static char *history_path = NULL;
 static char *legacy_path = NULL;
 
+/* Set when the corresponding file existed but couldn't be read/parsed at load time. The
+   in-RAM list is empty in that case, and writing it back would replace the user's real data
+   with nothing -- so every save is refused until a load succeeds. */
+static bool favorites_write_blocked = false;
+static bool history_write_blocked = false;
+
 /**
  * @brief Initialize the bookkeeping system with the favorites/history paths.
  *
@@ -106,17 +112,46 @@ static void bookkeeping_clear_list(bookkeeping_item_t *list, uint16_t count) {
     }
 }
 
+/** @brief Outcome of loading one list -- drives whether it's safe to write the file back. */
+typedef enum {
+    BK_LOAD_OK,          /**< File read and parsed. */
+    BK_LOAD_NO_FILE,     /**< Confirmed no such file; an empty list is the truth. */
+    BK_LOAD_UNREADABLE,  /**< File is there but couldn't be read/parsed -- DO NOT overwrite it. */
+} bk_load_result_t;
+
 /**
- * @brief Load a single list from a file (or empties if the file is absent).
+ * @brief Load a single list from a file.
+ *
+ * The list is always left in a valid (possibly empty) state. The return value tells the
+ * caller whether an empty list means "there really is nothing" or "we couldn't read it" --
+ * writing the list back in the latter case destroys the user's data.
  */
-static void bookkeeping_load_list_from(bookkeeping_item_t *list, uint16_t count, const char *path, const char *group) {
-    ini_t *ini = (path && file_exists((char *)path)) ? ini_try_load(path) : NULL;
-    if (ini) {
-        bookkeeping_ini_load_list(list, count, ini, group);
-        ini_free(ini);
-    } else {
+static bk_load_result_t bookkeeping_load_list_from(bookkeeping_item_t *list, uint16_t count, const char *path, const char *group) {
+    if (!path) {
         bookkeeping_clear_list(list, count);
+        return BK_LOAD_NO_FILE;
     }
+
+    file_presence_t presence = file_presence((char *)path);
+    if (presence != FILE_PRESENCE_PRESENT) {
+        bookkeeping_clear_list(list, count);
+        if (presence == FILE_PRESENCE_ABSENT) return BK_LOAD_NO_FILE;
+        debugf("[BOOKKEEPING] %s unreadable -- keeping the file as-is\n", path);
+        return BK_LOAD_UNREADABLE;
+    }
+
+    ini_t *ini = ini_try_load(path);
+    if (!ini) {
+        /* Present but unparseable: a truncated read or a corrupted card. Show an empty list
+           this session, but never write that emptiness back over the real file. */
+        bookkeeping_clear_list(list, count);
+        debugf("[BOOKKEEPING] %s failed to parse -- keeping the file as-is\n", path);
+        return BK_LOAD_UNREADABLE;
+    }
+
+    bookkeeping_ini_load_list(list, count, ini, group);
+    ini_free(ini);
+    return BK_LOAD_OK;
 }
 
 /**
@@ -129,21 +164,35 @@ static void bookkeeping_load_list_from(bookkeeping_item_t *list, uint16_t count,
  * @param history Pointer to the bookkeeping structure.
  */
 void bookkeeping_load (bookkeeping_t *history) {
-    bool have_fav = favorites_path && file_exists(favorites_path);
-    bool have_hist = history_path && file_exists(history_path);
+    file_presence_t fav_presence = favorites_path ? file_presence(favorites_path) : FILE_PRESENCE_ABSENT;
+    file_presence_t hist_presence = history_path ? file_presence(history_path) : FILE_PRESENCE_ABSENT;
+
+    bool have_fav = (fav_presence == FILE_PRESENCE_PRESENT);
+    bool have_hist = (hist_presence == FILE_PRESENCE_PRESENT);
     bool have_legacy = legacy_path && file_exists(legacy_path);
 
-    const char *hist_src = have_hist ? history_path : (have_legacy ? legacy_path : NULL);
-    const char *fav_src = have_fav ? favorites_path : (have_legacy ? legacy_path : NULL);
+    /* Only fall back to the legacy combined file when the split file is CONFIRMED missing.
+       If it's merely unreadable, loading legacy data would silently present a stale list. */
+    const char *hist_src = have_hist ? history_path
+                         : (hist_presence == FILE_PRESENCE_ABSENT && have_legacy ? legacy_path : NULL);
+    const char *fav_src = have_fav ? favorites_path
+                        : (fav_presence == FILE_PRESENCE_ABSENT && have_legacy ? legacy_path : NULL);
 
     /* Favorites/history keys are unique by construction -- skip the per-insert
        dedup scan so parsing the large favorites file is O(N), not O(N^2). */
     ini_assume_unique_keys(true);
-    bookkeeping_load_list_from(history->history_items, HISTORY_COUNT, hist_src, "history");
-    bookkeeping_load_list_from(history->favorite_items, FAVORITES_COUNT, fav_src, "favorite");
+    bk_load_result_t hist_res = bookkeeping_load_list_from(history->history_items, HISTORY_COUNT, hist_src, "history");
+    bk_load_result_t fav_res = bookkeeping_load_list_from(history->favorite_items, FAVORITES_COUNT, fav_src, "favorite");
     ini_assume_unique_keys(false);
 
-    /* Create the new split files on first boot, or migrate from the legacy file. */
+    /* An unreadable file must survive the session untouched: block every later write too
+       (the browser flushes pending toggles on exit, the grid saves on sort/clear/reorder),
+       not just the create-on-first-boot below. Cleared on the next successful load. */
+    history_write_blocked = (hist_presence == FILE_PRESENCE_UNKNOWN) || (hist_res == BK_LOAD_UNREADABLE);
+    favorites_write_blocked = (fav_presence == FILE_PRESENCE_UNKNOWN) || (fav_res == BK_LOAD_UNREADABLE);
+
+    /* Create the new split files on first boot, or migrate from the legacy file. Guarded by
+       the blocks above so a read failure can never be written back as an empty list. */
     if (!have_hist) {
         bookkeeping_save_history(history);
     }
@@ -231,6 +280,10 @@ static void bookkeeping_save_list_to(bookkeeping_item_t *list, uint16_t count, c
  * @param history Pointer to the bookkeeping structure.
  */
 void bookkeeping_save_history (bookkeeping_t *history) {
+    if (history_write_blocked) {
+        debugf("[BOOKKEEPING] history.ini unreadable this session -- refusing to overwrite it\n");
+        return;
+    }
     bookkeeping_save_list_to(history->history_items, HISTORY_COUNT, history_path, "history");
 }
 
@@ -240,6 +293,10 @@ void bookkeeping_save_history (bookkeeping_t *history) {
  * @param history Pointer to the bookkeeping structure.
  */
 void bookkeeping_save_favorites (bookkeeping_t *history) {
+    if (favorites_write_blocked) {
+        debugf("[BOOKKEEPING] favorites.ini unreadable this session -- refusing to overwrite it\n");
+        return;
+    }
     bookkeeping_save_list_to(history->favorite_items, FAVORITES_COUNT, favorites_path, "favorite");
 }
 

@@ -42,6 +42,11 @@ look identical in a library tab. To tell them apart, library tabs always show th
 a caption under its cover art. Favorites keeps its clean art-only look by default; if you'd like the
 same captions there too, turn on **Favorites captions** in the grid's `Z` → **Grid settings** menu.
 
+Hacks with no cover art at all are captioned the same way: they resolve to their base game's *name*
+from the metadata database, so the filename underneath is likewise the only thing telling them
+apart. Captioned tiles are taller than plain ones (the caption gets its own strip rather than eating
+into the art), so expect roughly one row less per screen while captions are on.
+
 ### Homebrew / no-art ROMs
 
 See [Game Art Images](./19_gamepak_boxart.md) for how box art is resolved, including the

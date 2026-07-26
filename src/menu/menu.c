@@ -229,13 +229,27 @@ static void menu_init (boot_params_t *boot_params) {
         char marker[256];
         snprintf(marker, sizeof(marker), "%smenu/n64ever/.migrated.v%d",
                  menu->storage_prefix, MENU_DATA_VERSION);
-        if (!file_exists(marker)) {
-            f_unlink(strip_fs_prefix(favorites_bk_path));
-            f_unlink(strip_fs_prefix(history_bk_path));
-            FILE *mk = fopen(marker, "wb");
-            if (mk) fclose(mk);
-            nuke_bk = true;
-            debugf("[MIGRATE] favorites/history reset for data v%d -> greeting\n", MENU_DATA_VERSION);
+        /* CONFIRMED absent only. file_exists() reports false for an unreadable card too, and
+           acting on that unlinked the user's favorites.ini on a momentary SD read error -- the
+           marker is invisible for one boot and this reset fires as if they'd never migrated.
+           If we can't tell, do nothing: a migrating user keeping a stale list is recoverable,
+           a wiped favorites.ini is not. */
+        switch (file_presence(marker)) {
+            case FILE_PRESENCE_ABSENT: {
+                f_unlink(strip_fs_prefix(favorites_bk_path));
+                f_unlink(strip_fs_prefix(history_bk_path));
+                FILE *mk = fopen(marker, "wb");
+                if (mk) fclose(mk);
+                nuke_bk = true;
+                debugf("[MIGRATE] favorites/history reset for data v%d -> greeting\n", MENU_DATA_VERSION);
+                break;
+            }
+            case FILE_PRESENCE_UNKNOWN:
+                /* Don't write the marker either -- that would suppress a genuine reset later. */
+                debugf("[MIGRATE] marker unreadable; skipping reset to protect favorites/history\n");
+                break;
+            case FILE_PRESENCE_PRESENT:
+                break;
         }
     }
     menu->fresh_reset = nuke_bk;
