@@ -52,9 +52,12 @@ docker run --rm -v "$PWD:/project" n64flashcartmenu-dev:latest rm -rf /project/b
 ./build-rom.sh
 ```
 
-> ⚠️ A fresh clone additionally needs libdragon **built** before the first ROM build — the repo
-> pins the submodule but not its compiled `.a` files. See
-> [§2 Fresh clones](#libdragon-submodule-and-fresh-clones).
+**From a fresh clone**, this is the whole thing — `build-rom.sh` bootstraps libdragon and the
+host tools itself:
+
+```bash
+git clone --recursive <repo> && cd <repo> && ./build-rom.sh
+```
 
 See **[§2 Build system](#2-build-system)** for the full story.
 
@@ -112,9 +115,8 @@ See **[§2 Build system](#2-build-system)** for the full story.
 
 ### How to build
 
-**Requirements:** Docker, and a `libdragon/` that has been **built** at least once — a fresh
-clone gets the source but not the `.a` files (see
-[libdragon submodule](#libdragon-submodule-and-fresh-clones)).
+**Requirements:** Docker, and a recursive clone. Nothing else — the script bootstraps everything
+missing (see [libdragon submodule](#libdragon-submodule-and-fresh-clones)).
 
 **Step 0 — build the Docker image (one time).** `build-rom.sh` hardcodes the image name
 `n64flashcartmenu-dev:latest` and does *not* build it for you. If it's missing, Docker will try
@@ -305,17 +307,25 @@ upstream at that commit and absorbed into `.git/modules/libdragon` — deliberat
 `rm -rf libdragon`, so the prebuilt `.a` files `build-rom.sh` depends on survived. All four
 submodules now register, and `LIBDRAGON_VERSION` resolves to `5cb976a` instead of `unknown`.
 
-> **Fresh clones still need libdragon built first.** `build-rom.sh` copies **prebuilt artifacts**
-> out of `libdragon/` (`libdragon.a`, `libdragonsys.a`, `n64.ld`, `dso.ld`, `rsp.ld`). Those are
-> build outputs, not source, so a freshly-checked-out submodule has none of them. Until
-> `build-rom.sh` learns to build libdragon on demand, do it once by hand:
->
-> ```bash
-> git submodule update --init
-> cd libdragon && make clobber -j && make libdragon tools -j && make install tools-install -j
-> ```
->
-> This is the remaining gap — the gitlink is fixed, the bootstrap is not.
+**Fresh clones bootstrap themselves.** `libdragon.a` and `libdragonsys.a` are build outputs, not
+source, so a freshly-checked-out submodule has neither — and the copy into `/opt/libdragon` used
+to fail. `build-rom.sh` now runs `make libdragon` in the submodule when either archive is
+missing. Everything else it copies out of `libdragon/` (`n64.mk`, `n64.ld`, `dso.ld`, `rsp.ld`,
+the headers) is tracked source.
+
+So the full path from nothing is:
+
+```bash
+git clone --recursive <repo> && cd <repo> && ./build-rom.sh
+```
+
+First run does three one-time steps automatically — build libdragon (`[libdragon]`), build the
+host tools (`[build-tools]`), then the ROM. Subsequent runs skip both.
+`build-rom.sh` also fails early with an actionable message if the Docker image or the libdragon
+checkout is missing, rather than letting Docker try to pull a nonexistent image.
+
+**Verified 2026-07-26:** clean `git clone --recursive` → `./build-rom.sh` → exit 0,
+`output/OS64.v64` = 1.86 MB, with no prebuilt artifacts of any kind present beforehand.
 
 > ### ⛔ Do NOT bump libdragon
 >
