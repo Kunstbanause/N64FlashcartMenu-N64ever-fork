@@ -52,9 +52,15 @@ static int grid_y0(void) {
 #define PORT_H              112
 /* Filename caption strip ADDED to the bottom of a tile when captions are on (library tabs
    always; Favorites opt-in) -- disambiguates ROM hacks that share their base game's art.
-   Its height is measured from the live font at runtime (see caption_line_h), never
+   Its height is measured from the live font at runtime (see caption_box_h), never
    hardcoded: rdpq silently discards a text line that doesn't fit its box. */
 #define CAPTION_PAD         2       /* breathing room between the art edge and the glyphs */
+#define TEXT_LINES_MAX      4       /* upper bound for the measured line-height cache */
+/* Full-name strip under the grid, above the action bar. The action-bar labels are
+   VALIGN_BOTTOM in a box at y=411..451, so they start around y=432 (Classic) / y=437
+   (Pixel), and nothing draws a separator line -- the band below GRID_Y1 is dead space,
+   which is why this strip costs the grid no height and can never drop a tile row. */
+#define FOOTER_GAP          2       /* px between the tile area and the full-name strip */
 
 /* ---------- Inspect popup ---------- */
 /* 2+2 inspect layout: smaller frame; top band = art | description (with a
@@ -539,36 +545,86 @@ static bool grid_captions_on(void) {
     return (grid_tab != 0) || grid_caption_favs;
 }
 
-static int caption_h_cached = 0;    /* 0 = not measured yet */
+/* Measured box heights, indexed by line count. 0 = not measured yet.
+   Reset in init() -- Settings can swap the font live. */
+static int caption_h_cached[TEXT_LINES_MAX + 1] = { 0 };
 
-/* Height of the filename caption strip, measured from whatever font is loaded.
+/* Height of an N-line filename caption strip, measured from whatever font is loaded.
    This CANNOT be a hardcoded constant: rdpq DISCARDS a text line outright when the box is
    shorter than the font's line height (rdpq_paragraph.c: `ascent - descent >= height`
    -> skip_current_line), so an undersized strip renders NOTHING rather than clipping --
    which is exactly how the original 14px constant failed silently, the bundled 12px font
    needing 15. Measuring keeps a legacy or SD custom.font64 from resurrecting the bug.
 
-   Ask the layout engine directly -- lay a line out at each height and take the first that
-   actually emits glyphs -- rather than deriving it from the reported bbox: a laid-out
+   Ask the layout engine directly -- lay N lines out at each height and take the first that
+   actually emits every glyph -- rather than deriving it from the reported bbox: a laid-out
    line's bbox is (ascent - descent + line_gap + 1), and mkfont gives BOTH bundled fonts a
-   line_gap of -1, so the bbox reads one pixel UNDER the height the skip test demands. */
-static int caption_line_h(void) {
-    if (caption_h_cached) return caption_h_cached;
+   line_gap of -1, so the bbox reads one pixel UNDER the height the skip test demands.
+   Probe with the wrap mode we actually render with, and with explicit newlines: rdpq
+   re-evaluates the skip test per line, so a too-short box drops the LAST lines, not all. */
+static int caption_box_h(int lines) {
+    if (lines < 1) lines = 1;
+    if (lines > TEXT_LINES_MAX) lines = TEXT_LINES_MAX;
+    if (caption_h_cached[lines]) return caption_h_cached[lines];
 
-    for (int h = 8; h <= 64; h++) {
-        /* A skipped line lays out zero chars -- that is the signal we're looking for. */
-        int nbytes = 2;
+    /* "Ag" per line, newline-separated. Newlines aren't glyphs, so a fully laid-out
+       probe reports exactly 2 chars per line; anything less means a line was skipped. */
+    char probe[TEXT_LINES_MAX * 3];
+    int  plen = 0;
+    for (int i = 0; i < lines; i++) {
+        if (i) probe[plen++] = '\n';
+        probe[plen++] = 'A';
+        probe[plen++] = 'g';
+    }
+    probe[plen] = '\0';
+
+    for (int h = 8; h <= 64 * TEXT_LINES_MAX; h++) {
+        int nbytes = plen;
         rdpq_paragraph_t *p = rdpq_paragraph_build(
-            &(rdpq_textparms_t){ .width = 64, .height = h, .wrap = WRAP_ELLIPSES },
-            FNT_DEFAULT, "Ag", &nbytes);
-        bool fits = p && p->nchars > 0;
+            &(rdpq_textparms_t){ .width = 64, .height = h, .wrap = WRAP_WORD },
+            FNT_DEFAULT, probe, &nbytes);
+        bool fits = p && p->nchars >= 2 * lines;
         if (p) rdpq_paragraph_free(p);
-        if (fits) { caption_h_cached = h + CAPTION_PAD; return caption_h_cached; }
+        if (fits) { caption_h_cached[lines] = h + CAPTION_PAD; return caption_h_cached[lines]; }
     }
 
-    caption_h_cached = 15 + CAPTION_PAD;   /* unreachable in practice; keep the strip usable */
-    return caption_h_cached;
+    /* Unreachable in practice; keep the strip usable. */
+    caption_h_cached[lines] = 15 * lines + CAPTION_PAD;
+    return caption_h_cached[lines];
 }
+
+/* How many lines of the loaded font actually survive a box `h` px tall. Anything laid out
+   past this is INVISIBLE, not clipped -- rdpq drops the overflowing lines outright. */
+static int text_lines_that_fit(int h) {
+    for (int n = TEXT_LINES_MAX; n > 1; n--) {
+        if (caption_box_h(n) - CAPTION_PAD <= h) return n;
+    }
+    return 1;
+}
+
+/* Rows of `tile_h`-tall tiles that fit the tile area, mirroring visible_last_row(). */
+static int grid_rows_that_fit(int tile_h) {
+    int avail = (GRID_Y1 - G_PADY) - TILE_AREA_Y0;
+    int n = (avail + G_GAP) / (tile_h + G_GAP);
+    return n > 0 ? n : 1;
+}
+
+/* Square tiles are 104x104 against Box's 104x74, so they have the headroom for a second
+   caption line; Box tiles don't and stay single-line.
+
+   But only take that second line if it's actually free. Strip height is measured from the
+   live font, and the Classic font's is nearly double the Pixel font's -- on Large square
+   tiles a 2-line strip pushes 135+40 past the point where two rows fit, halving the grid.
+   Checking rather than assuming keeps this correct for an SD custom.font64 too. */
+static int caption_lines(void) {
+    if (!grid_sq) return 1;
+    int base = grid_large ? (LAND_W * 13 / 10) : LAND_W;
+    return (grid_rows_that_fit(base + caption_box_h(2))
+            >= grid_rows_that_fit(base + caption_box_h(1))) ? 2 : 1;
+}
+
+/* Strip height for the active tile shape. */
+static int caption_strip_h(void) { return caption_box_h(caption_lines()); }
 
 /* Flow the favorites (in order) into rows of variable width: landscape covers are
    wide, Japanese covers are narrow, so JP-heavy rows pack more across and any row
@@ -580,7 +636,7 @@ static void compute_flow(void) {
     int x = left, row = 0, rh = 0;
     /* The caption strip is ADDED to the cell rather than carved out of it, so cover art
        keeps its designed size when captions are on (at the cost of ~one row per screen). */
-    int cap = grid_captions_on() ? caption_line_h() : 0;
+    int cap = grid_captions_on() ? caption_strip_h() : 0;
 
     /* Pass 1: assign tiles to rows, left-aligned */
     for (int gi = 0; gi < fav_count; gi++) {
@@ -796,6 +852,27 @@ static void fav_name_from_filename(path_t *p, char *out, size_t outsz) {
     int len = (int)strlen(buf);
     while (len > 0 && buf[len - 1] == ' ') buf[--len] = '\0';
     strncpy(out, buf, outsz - 1); out[outsz - 1] = '\0';
+}
+
+/* The item's filename with the extension stripped -- the ONLY string that tells ROM hacks and
+   homebrew apart. They carry their base game's game code, so the metadata DB (which keys on
+   the first three code chars) hands them the base game's title, and the boxart loader hands
+   them its cover. Everything user-facing in the grid names the file instead.
+
+   Unlike fav_name_from_filename() this keeps " (region)"/" [tag]" suffixes: they're often the
+   only difference between two builds of the same hack. */
+static void grid_file_label(int fav_i, char *out, size_t outsz) {
+    out[0] = '\0';
+    if (fav_i < 0 || fav_i >= grid_items_cap) return;
+    path_t *p = grid_items[fav_i].primary_path;
+    if (!p || !path_has_value(p)) return;
+    const char *fn = path_last_get(p);
+    if (!fn) return;
+    strncpy(out, fn, outsz - 1);
+    out[outsz - 1] = '\0';
+    char *dot = strrchr(out, '.');
+    if (dot) *dot = '\0';
+    sanitize_display_name(out);
 }
 
 static void load_rom_info_into(grid_entry_t *e, int fav_i, menu_t *menu) {
@@ -1307,25 +1384,22 @@ static void refresh_grid(menu_t *menu) {
 /* Draw the ROM's filename (extension stripped) into the caption strip at the bottom of a
    tile. This is the only thing that tells ROM hacks apart: they share their base game's
    game code, so they resolve to the same cover art AND the same metadata DB name. */
-static void draw_tile_caption(int fav_i, int x0, int y, int w, int h) {
-    char cap[64] = "";
-    const char *fn = path_last_get(grid_items[fav_i].primary_path);
-    if (fn) {
-        strncpy(cap, fn, sizeof(cap) - 1);
-        cap[sizeof(cap) - 1] = '\0';
-        char *dot = strrchr(cap, '.');
-        if (dot) *dot = '\0';
-        sanitize_display_name(cap);
-    }
+static void draw_tile_caption(int fav_i, int x0, int y, int w, int h, int lines) {
+    char cap[64];
+    grid_file_label(fav_i, cap, sizeof(cap));
     if (!cap[0]) return;
 
+    /* WRAP_ELLIPSES cannot wrap: rdpq draws the "..." and then abandons the rest of the
+       paragraph (rdpq_paragraph.c, WRAP_ELLIPSES -> skip_current_line -> return). So a
+       multi-line caption has to be WRAP_WORD, which truncates SILENTLY instead. That's
+       tolerable only because the full name is always on screen in the footer strip. */
     rdpq_text_printn(
         &(rdpq_textparms_t){
             .width   = w,
             .height  = h,
             .align   = ALIGN_CENTER,
             .valign  = VALIGN_CENTER,
-            .wrap    = WRAP_ELLIPSES,
+            .wrap    = (lines > 1) ? WRAP_WORD : WRAP_ELLIPSES,
         },
         FNT_DEFAULT,
         x0, y,
@@ -1371,7 +1445,8 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
        the tile's designed size. Note the hover enlarge inflates inner_h but not cap_h, so
        the selection's extra pixels go to the art and the strip stays a constant height. */
     bool show_caption = grid_captions_on();
-    int  cap_h = show_caption ? caption_line_h() : 0;
+    int  cap_lines    = caption_lines();
+    int  cap_h = show_caption ? caption_strip_h() : 0;
     int  art_h = inner_h - cap_h;
     if (art_h < 1) art_h = 1;
 
@@ -1393,51 +1468,67 @@ static void draw_tile(int gi, int cx, int cy, int cw, int ch, float anim_f, bool
         rdpq_mode_pop();
 
         if (show_caption) {
-            draw_tile_caption(fav_i, x0, y0 + art_h, inner_w, cap_h);
+            draw_tile_caption(fav_i, x0, y0 + art_h, inner_w, cap_h, cap_lines);
         }
     } else {
-        /* No art: show the display name — prefer the looked-up name (meta_name:
-           DB name, or the ROM header title fetched for no-art tiles), else the raw
-           header title. A grey cart placeholder only while nothing is known yet. */
-        char name[64];
-        if (fav_entry_cache[fav_i].meta_name[0]) {
-            strncpy(name, fav_entry_cache[fav_i].meta_name, sizeof(name) - 1);
-            name[sizeof(name) - 1] = '\0';
-        } else {
-            memcpy(name, fav_entry_cache[fav_i].title, 20);
-            name[20] = '\0';
-            for (int k = 19; k >= 0 && name[k] == ' '; k--) name[k] = '\0';
-        }
-        sanitize_display_name(name);
+        /* No art: grey cartridge (or 64DD disc) placeholder plus the filename.
 
-        int tlen = strlen(name);
-        if (tlen > 0) {
-            rdpq_text_printn(
-                &(rdpq_textparms_t){
-                    .width   = inner_w,
-                    .height  = art_h,
-                    .align   = ALIGN_CENTER,
-                    .valign  = VALIGN_CENTER,
-                    .wrap    = WRAP_WORD,
-                },
-                FNT_DEFAULT,
-                x0, y0,
-                name, tlen
-            );
-        } else if (fav_entry_cache[fav_i].is_disk) {
-            ui_components_disc_placeholder_draw(x0, y0, x1, y1 - cap_h);
+           This used to centre fav_entry_cache[].meta_name in the tile instead, and only fall
+           back to the placeholder when that name was empty. But meta_name comes from the
+           metadata DB, which matches on the first THREE chars of the game code -- so hacks
+           and homebrew carrying a retail base code confidently rendered as the base game
+           ("Super Mario 64" over a Mario hack), and because a resolved name always beat the
+           placeholder, the artwork-less look was a wrong title rather than a neutral cart.
+           The filename is the only string that's actually right for these, so it's all we
+           show. */
+        int cap_h_local   = cap_h;
+        int cap_lines_local = cap_lines;
+        if (!show_caption) {
+            /* Captions are off (Favorites opt-out) but an unlabelled grey cart is
+               unidentifiable, so force one. compute_flow() reserved no room for it, so carve
+               it out of this tile's own art band -- everything stays inside the tile's rect,
+               leaving the grid layout byte-identical for the tiles that do have art. One
+               line even in Square mode: two would eat too much of a 104px placeholder. */
+            cap_lines_local = 1;
+            cap_h_local     = caption_box_h(1);
+        }
+        int art_h_local = inner_h - cap_h_local;
+        if (art_h_local < 1) art_h_local = 1;
+
+        if (fav_entry_cache[fav_i].is_disk) {
+            ui_components_disc_placeholder_draw(x0, y0, x1, y0 + art_h_local);
         } else {
-            /* Name not resolved yet (no art, no code/DB hit): a grey cart
-               placeholder reads better than a pure-black tile. */
-            ui_components_cart_placeholder_draw(x0, y0, x1, y1 - cap_h);
+            ui_components_cart_placeholder_draw(x0, y0, x1, y0 + art_h_local);
         }
 
-        /* Art-less hacks resolve to the same DB name as their base game, so they need the
-           filename caption just as much as the ones that share its cover art. */
-        if (show_caption) {
-            draw_tile_caption(fav_i, x0, y0 + art_h, inner_w, cap_h);
-        }
+        draw_tile_caption(fav_i, x0, y0 + art_h_local, inner_w, cap_h_local, cap_lines_local);
     }
+}
+
+/* Full filename of the highlighted game, in the dead strip between the tile area and the
+   action bar. A tile caption is only ~13 characters wide, so this is the surface that
+   actually answers "what am I looking at" -- at 556px it fits ~70 characters, i.e. it never
+   truncates in practice, which is what makes the caption's silent truncation acceptable. */
+static void draw_selected_name_footer(void) {
+    if (fav_count <= 0 || sel_fav < 0 || sel_fav >= fav_count) return;
+
+    char name[128];
+    grid_file_label(fav_indices[sel_fav], name, sizeof(name));
+    if (!name[0]) return;
+
+    rdpq_text_printn(
+        &(rdpq_textparms_t){
+            .style_id = STL_DEFAULT,
+            .width    = VISIBLE_AREA_WIDTH - (TEXT_MARGIN_HORIZONTAL * 2),
+            .height   = caption_box_h(1),
+            .align    = ALIGN_CENTER,
+            .valign   = VALIGN_CENTER,
+            .wrap     = WRAP_ELLIPSES,
+        },
+        FNT_DEFAULT,
+        VISIBLE_AREA_X0 + TEXT_MARGIN_HORIZONTAL, GRID_Y1 + FOOTER_GAP,
+        name, strlen(name)
+    );
 }
 
 /* Pick the display name (metadata.ini name preferred, ROM header title fallback)
@@ -1617,6 +1708,21 @@ static void draw_inspect(menu_t *menu) {
                                art_x + INSPECT_BOXART_W, art_y + INSPECT_BOXART_H);
     }
 
+    /* ---- Layout regions ---- */
+    /* Computed before the metadata strings below, which size themselves to meta_h. */
+    int top_h   = INSPECT_BOXART_H;                              /* top band = art height */
+    int div_x   = art_x + INSPECT_LEFT_W + INSPECT_PAD / 2;      /* vertical divider x */
+    int right_x = div_x + INSPECT_PAD / 2 + 2;
+    int right_w = dlg_x1 - INSPECT_PAD - right_x;
+    int right_y = art_y;
+    int right_h = top_h;                                         /* description = top band height */
+    int hdiv_y  = art_y + top_h + INSPECT_PAD / 2;               /* horizontal divider y */
+    int meta_y  = hdiv_y + 1 + INSPECT_PAD / 2;
+    int meta_h  = dlg_y1 - INSPECT_PAD - meta_y;
+
+    /* Dividers removed per request — div_x (column split) and hdiv_y (metadata-strip baseline)
+       are still used for layout below, just no longer drawn as lines. */
+
     /* ---- Metadata for the bottom 2+2 strip ---- */
     char left_info[256];
     char right_info[256];
@@ -1667,33 +1773,46 @@ static void draw_inspect(menu_t *menu) {
             snprintf(left_info, sizeof(left_info), "%s\n%s\n%s", date, build_lbl, standard);
         else
             snprintf(left_info, sizeof(left_info), "%s\n%s", date, standard);
-        snprintf(right_info, sizeof(right_info), "%.40s\n%.40s", display_name, author);
+
+        /* Filename FIRST: display_name comes from the metadata DB, which keys on the first
+           three game-code chars, so a hack inherits its base game's title and this popup
+           used to name the wrong game. The DB title stays as a subtitle -- it's still the
+           nicer label for a legit ROM with an ugly filename -- but drop it when there's no
+           DB hit, when it just repeats the filename, or when the strip can't hold three
+           lines. That last case is real: the Classic font's line height only leaves room for
+           two here, and rdpq would silently drop the developer rather than the subtitle. */
+        char file_label[64];
+        grid_file_label(fav_i, file_label, sizeof(file_label));
+        if (!file_label[0]) {
+            strncpy(file_label, display_name, sizeof(file_label) - 1);
+            file_label[sizeof(file_label) - 1] = '\0';
+        }
+        bool show_db_title = display_name[0]
+                             && strcmp(display_name, file_label) != 0
+                             && text_lines_that_fit(meta_h) >= 3;
+        if (show_db_title)
+            snprintf(right_info, sizeof(right_info), "%.60s\n%.40s\n%.40s",
+                     file_label, display_name, author);
+        else
+            snprintf(right_info, sizeof(right_info), "%.60s\n%.40s", file_label, author);
     }
     neutralize_rdpq_escapes(left_info);    /* any field may carry a '$'/'^' (title, code) */
     neutralize_rdpq_escapes(right_info);
-
-    /* ---- Layout regions ---- */
-    int top_h   = INSPECT_BOXART_H;                              /* top band = art height */
-    int div_x   = art_x + INSPECT_LEFT_W + INSPECT_PAD / 2;      /* vertical divider x */
-    int right_x = div_x + INSPECT_PAD / 2 + 2;
-    int right_w = dlg_x1 - INSPECT_PAD - right_x;
-    int right_y = art_y;
-    int right_h = top_h;                                         /* description = top band height */
-    int hdiv_y  = art_y + top_h + INSPECT_PAD / 2;               /* horizontal divider y */
-    int meta_y  = hdiv_y + 1 + INSPECT_PAD / 2;
-    int meta_h  = dlg_y1 - INSPECT_PAD - meta_y;
-
-    /* Dividers removed per request — div_x (column split) and hdiv_y (metadata-strip baseline)
-       are still used for layout below, just no longer drawn as lines. */
 
     /* ---- Bottom 2+2 metadata strip (both columns vertically centred in the strip) ---- */
     rdpq_text_printn(
         &(rdpq_textparms_t){ .width = INSPECT_LEFT_W, .height = meta_h,
                              .align = ALIGN_LEFT, .valign = VALIGN_CENTER, .wrap = WRAP_WORD },
         FNT_DEFAULT, art_x, meta_y, left_info, strlen(left_info));
+    /* WRAP_ELLIPSES, not WRAP_WORD: this column can now carry three entries (filename, DB
+       title, developer) and a filename is long enough to wrap to two lines on its own, which
+       would push the developer out of the box entirely. rdpq re-evaluates its fits-in-box
+       test at every explicit newline, so ellipsising each entry to one line keeps them all
+       visible. meta_h (45px) holds 3 lines of the Pixel font but only 2 of the Classic one,
+       which is why the DB-title line is gated on text_lines_that_fit() above. */
     rdpq_text_printn(
         &(rdpq_textparms_t){ .width = right_w, .height = meta_h,
-                             .align = ALIGN_LEFT, .valign = VALIGN_CENTER, .wrap = WRAP_WORD },
+                             .align = ALIGN_LEFT, .valign = VALIGN_CENTER, .wrap = WRAP_ELLIPSES },
         FNT_DEFAULT, right_x, meta_y, right_info, strlen(right_info));
 
     /* ---- Right column: scrollable description (top band) ---- */
@@ -1821,7 +1940,11 @@ static void draw_confirm_remove(menu_t *menu) {
             }
         }
         if (!used_custom) {
-            game_display_name(&fav_entry_cache[fav_indices[sel_fav]], name_buf, sizeof(name_buf));
+            /* Name the FILE, not the metadata-DB title -- confirming a destructive action
+               against "Super Mario 64" when you're actually removing a hack of it is exactly
+               the wrong time to show the base game's name. */
+            grid_file_label(fav_indices[sel_fav], name_buf, sizeof(name_buf));
+            if (!name_buf[0]) strcpy(name_buf, "this game");
         }
     }
     const char *name = name_buf;
@@ -3875,6 +3998,13 @@ static void draw(menu_t *menu, surface_t *d) {
         rdpq_set_scissor(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
     }
 
+    /* Suppressed under the overlays -- they own the screen and draw their own action bars.
+       Kept in move mode, where knowing what you're dragging is the whole point. (The
+       screensaver and the library-scan messagebox already returned above.) */
+    if (!show_history && !show_metadata && !grid_more_active && !show_inspect) {
+        draw_selected_name_footer();
+    }
+
     if (show_history) {
         draw_history_panel(menu);
     } else if (show_metadata) {
@@ -4184,7 +4314,8 @@ void view_games_grid_init(menu_t *menu) {
     grid_sq              = menu->settings.grid_square_tiles;
     grid_large           = menu->settings.grid_large_tiles;
     grid_caption_favs    = menu->settings.grid_show_captions_favorites;
-    caption_h_cached     = 0;   /* re-measure: the font may have been swapped in Settings */
+    /* re-measure every strip height: the font may have been swapped in Settings */
+    for (int i = 0; i <= TEXT_LINES_MAX; i++) caption_h_cached[i] = 0;
     gv_is_box            = is_box_view(menu->settings.image_view_grid);
     inspect_fav_i_cached = -1;
     if (inspect_logo) { sprite_free(inspect_logo); inspect_logo = NULL; }
